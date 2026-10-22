@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/feder-cr/git-ai/internal/git"
-	"github.com/feder-cr/git-ai/internal/git/gitcmd"
 	"github.com/feder-cr/git-ai/internal/git/localrepo"
 	"github.com/feder-cr/git-ai/internal/git/remoterepo"
 	"github.com/feder-cr/git-ai/internal/gitaly/hook/updateref"
@@ -206,6 +206,33 @@ func (s *Server) UserRevert(ctx context.Context, req *gitalypb.UserRevertRequest
 	}, nil
 }
 
+// resolveStartBranch resolves the start branch name of a request to its commit. exact reads a
+// reference by its exact name, peeled to its commit, and resolve is git's resolution of a revision,
+// both in the repository the start branch is read from.
+//
+// git resolves a bare name x with its DWIM rules, to refs/tags/x before refs/heads/x, so a tag named
+// like the start branch would answer for the branch. A name x is therefore read as the branch
+// refs/heads/x first. When there is no such branch, the name is resolved as before this rule, by
+// design: callers pass a SHA or a tag as a start point, and a missing branch keeps that DWIM
+// resolution for compatibility. A full reference name (refs/...) is read exactly as given, with no
+// fallback: a missing refs/heads/x does not resolve through refs/refs/heads/x or another decoy.
+func resolveStartBranch(
+	name string,
+	exact func(git.ReferenceName) (git.ObjectID, error),
+	resolve func(git.Revision) (git.ObjectID, error),
+) (git.ObjectID, error) {
+	if strings.HasPrefix(name, "refs/") {
+		return exact(git.ReferenceName(name))
+	}
+
+	commit, err := exact(git.NewReferenceNameFromBranchName(name))
+	if !errors.Is(err, git.ErrReferenceNotFound) {
+		return commit, err
+	}
+
+	return resolve(git.Revision(name + "^{commit}"))
+}
+
 type requestFetchingStartRevision interface {
 	GetBranchName() []byte
 	GetStartRepository() *gitalypb.Repository
@@ -222,16 +249,27 @@ func (s *Server) fetchStartRevision(
 		startBranchName = req.GetBranchName()
 	}
 
-	var remoteRepo gitcmd.Repository = localRepo
+	// The start branch is read in the start repository, or in the local one without it.
+	exact := func(name git.ReferenceName) (git.ObjectID, error) {
+		return s.resolveBranchCommitExactly(ctx, localRepo, name)
+	}
+	resolve := func(revision git.Revision) (git.ObjectID, error) {
+		return localRepo.ResolveRevision(ctx, revision)
+	}
 	if startRepository := req.GetStartRepository(); startRepository != nil {
-		var err error
-		remoteRepo, err = remoterepo.New(ctx, startRepository, s.conns)
+		remoteRepo, err := remoterepo.New(ctx, startRepository, s.conns)
 		if err != nil {
 			return "", structerr.NewInternal("%w", err)
 		}
+		exact = func(name git.ReferenceName) (git.ObjectID, error) {
+			return remoteRepo.ResolveReference(ctx, name)
+		}
+		resolve = func(revision git.Revision) (git.ObjectID, error) {
+			return remoteRepo.ResolveRevision(ctx, revision)
+		}
 	}
 
-	startRevision, err := remoteRepo.ResolveRevision(ctx, git.Revision(fmt.Sprintf("%s^{commit}", startBranchName)))
+	startRevision, err := resolveStartBranch(string(startBranchName), exact, resolve)
 	if err != nil {
 		return "", structerr.NewInvalidArgument("resolve start ref: %w", err)
 	}

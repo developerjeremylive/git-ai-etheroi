@@ -3,6 +3,7 @@ package operations
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -421,4 +422,121 @@ func TestUserApplyPatchResolvesBranchesExactly(t *testing.T) {
 			require.Empty(t, exactReferenceValue(t, cfg, repoPath, "refs/heads/x"), "no branch x")
 		})
 	}
+}
+
+// TestStartBranchResolvesTheBranchFirst checks the start branch of UserCherryPick, UserRevert and
+// UserRebaseConfirmable (resolveStartBranch): a name is read as the branch of that name first, so a
+// tag named like an existing start branch does not answer for it; a name without a branch keeps
+// git's resolution, so a SHA or a tag still works as a start point; and a full reference name is
+// read exactly as given, so a missing one does not resolve through a decoy.
+func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
+	t.Parallel()
+
+	ctx, cfg, client := setupExactBranchService(t)
+
+	cherryPick := func(setup cherryPickOrRevertSetup, startBranch string) (*gitalypb.UserCherryPickResponse, error) {
+		return client.UserCherryPick(ctx, &gitalypb.UserCherryPickRequest{
+			Repository:      setup.repo,
+			User:            gittest.TestUser,
+			Commit:          setup.commit,
+			BranchName:      []byte("new"),
+			StartBranchName: []byte(startBranch),
+			Message:         []byte("cherry-pick onto new"),
+		})
+	}
+
+	t.Run("cherry-pick, start branch with a tag of its name", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		writeDecoy(t, cfg, setup.repoPath, git.ReferenceName("refs/tags/"+git.DefaultBranch))
+
+		resp, err := cherryPick(setup, git.DefaultBranch)
+		require.NoError(t, err)
+		require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()),
+			"the start branch, not the tag of its name, is the parent")
+	})
+
+	t.Run("cherry-pick, a SHA as the start", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+
+		resp, err := cherryPick(setup, setup.base.String())
+		require.NoError(t, err)
+		require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
+	})
+
+	t.Run("cherry-pick, a tag without a branch of its name as the start", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		gittest.WriteRef(t, cfg, setup.repoPath, "refs/tags/v1", setup.base)
+
+		resp, err := cherryPick(setup, "v1")
+		require.NoError(t, err)
+		require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
+	})
+
+	for _, decoy := range exactBranchDecoys {
+		t.Run("cherry-pick, a missing full reference name, "+decoy.String(), func(t *testing.T) {
+			t.Parallel()
+
+			setup := setupCherryPickOrRevert(t, ctx, cfg)
+			decoyCommit := writeDecoy(t, cfg, setup.repoPath, decoy)
+
+			_, err := cherryPick(setup, "refs/heads/x")
+			testhelper.RequireGrpcCode(t, err, codes.InvalidArgument)
+			require.ErrorContains(t, err, "resolve start ref")
+			require.Empty(t, exactReferenceValue(t, cfg, setup.repoPath, "refs/heads/new"), "no branch new")
+			require.Equal(t, decoyCommit.String(), exactReferenceValue(t, cfg, setup.repoPath, decoy), "the decoy is untouched")
+		})
+	}
+
+	t.Run("revert, start branch with a tag of its name", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		gittest.WriteRef(t, cfg, setup.repoPath, git.DefaultRef, git.ObjectID(setup.commit.GetId()))
+		// The tag's tree holds the file that the revert removes, so that the revert applies onto it
+		// too: only the parent tells which of the two it started from.
+		writeDecoy(t, cfg, setup.repoPath, git.ReferenceName("refs/tags/"+git.DefaultBranch),
+			gittest.TreeEntry{Path: "base", Mode: "100644", Content: "base\n"},
+			gittest.TreeEntry{Path: "picked", Mode: "100644", Content: "picked\n"})
+
+		resp, err := client.UserRevert(ctx, &gitalypb.UserRevertRequest{
+			Repository:      setup.repo,
+			User:            gittest.TestUser,
+			Commit:          setup.commit,
+			BranchName:      []byte("new"),
+			StartBranchName: []byte(git.DefaultBranch),
+			Message:         []byte("revert onto new"),
+		})
+		require.NoError(t, err)
+		require.Equal(t, setup.commit.GetId(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()),
+			"the start branch, not the tag of its name, is the parent")
+	})
+
+	t.Run("rebase onto a remote branch with a tag of its name", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupRebasableRepositories(t, ctx, cfg, true)
+		writeDecoy(t, cfg, setup.remoteRepoPath, git.ReferenceName("refs/tags/"+setup.remoteBranch))
+
+		stream, err := client.UserRebaseConfirmable(ctx)
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableHeaderRequest(setup.localRepo, gittest.TestUser, "1",
+			setup.localBranch, setup.localCommit, setup.remoteRepo, setup.remoteBranch)))
+		first, err := stream.Recv()
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableApplyRequest(true)))
+		second, err := stream.Recv()
+		require.NoError(t, err)
+		require.True(t, second.GetRebaseApplied())
+		_, err = stream.Recv()
+		require.Equal(t, io.EOF, err)
+
+		require.Equal(t, setup.remoteCommit.String(), parentsOf(t, cfg, setup.localRepoPath, first.GetRebaseSha()),
+			"the rebase is onto the remote branch, not onto the tag of its name")
+	})
 }
