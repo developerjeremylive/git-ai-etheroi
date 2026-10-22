@@ -565,6 +565,48 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 		require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
 	})
 
+	t.Run("cherry-pick, a SHA as the start with a branch named like the SHA", func(t *testing.T) {
+		t.Parallel()
+
+		// git takes a full object ID for the object, not for a reference named like it.
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		writeDecoy(t, cfg, setup.repoPath, git.ReferenceName("refs/heads/"+setup.base.String()),
+			gittest.TreeEntry{Path: "base", Mode: "100644", Content: "base\n"})
+
+		resp, err := cherryPick(setup, setup.base.String())
+		require.NoError(t, err)
+		require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()),
+			"the SHA, not the branch named like it, is the parent")
+	})
+
+	// revisionSetup moves main to the commit of the setup, so that main~1 is base, and tags base as
+	// the annotated tag v1.
+	revisionSetup := func(t *testing.T) cherryPickOrRevertSetup {
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		gittest.WriteRef(t, cfg, setup.repoPath, git.DefaultRef, git.ObjectID(setup.commit.GetId()))
+		gittest.WriteTag(t, cfg, setup.repoPath, "v1", setup.base.Revision(), gittest.WriteTagConfig{Message: "v1"})
+		return setup
+	}
+	for _, start := range []string{
+		"refs/heads/" + git.DefaultBranch + "~1",
+		git.DefaultBranch + "~1",
+		"refs/tags/v1",
+		"refs/tags/v1^{}",
+		"v1^{}",
+	} {
+		t.Run("cherry-pick, a revision as the start, "+start, func(t *testing.T) {
+			t.Parallel()
+
+			setup := revisionSetup(t)
+			// A tag named like the branch: main~1 is the branch's parent, not the tag's.
+			writeDecoy(t, cfg, setup.repoPath, git.ReferenceName("refs/tags/"+git.DefaultBranch))
+
+			resp, err := cherryPick(setup, start)
+			require.NoError(t, err)
+			require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
+		})
+	}
+
 	t.Run("cherry-pick, a tag without a branch of its name as the start", func(t *testing.T) {
 		t.Parallel()
 
@@ -637,4 +679,47 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 		require.Equal(t, setup.remoteCommit.String(), parentsOf(t, cfg, setup.localRepoPath, first.GetRebaseSha()),
 			"the rebase is onto the remote branch, not onto the tag of its name")
 	})
+
+	t.Run("rebase onto a remote SHA with a branch named like the SHA", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupRebasableRepositories(t, ctx, cfg, true)
+		writeDecoy(t, cfg, setup.remoteRepoPath, git.ReferenceName("refs/heads/"+setup.remoteCommit.String()))
+
+		stream, err := client.UserRebaseConfirmable(ctx)
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableHeaderRequest(setup.localRepo, gittest.TestUser, "1",
+			setup.localBranch, setup.localCommit, setup.remoteRepo, setup.remoteCommit.String())))
+		first, err := stream.Recv()
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableApplyRequest(true)))
+		second, err := stream.Recv()
+		require.NoError(t, err)
+		require.True(t, second.GetRebaseApplied())
+		_, err = stream.Recv()
+		require.Equal(t, io.EOF, err)
+
+		require.Equal(t, setup.remoteCommit.String(), parentsOf(t, cfg, setup.localRepoPath, first.GetRebaseSha()),
+			"the rebase is onto the SHA, not onto the branch named like it")
+	})
+}
+
+// TestSplitRevisionSuffix checks the split of a start revision into its name and its suffix.
+func TestSplitRevisionSuffix(t *testing.T) {
+	t.Parallel()
+
+	for revision, expected := range map[string][2]string{
+		"main":                {"main", ""},
+		"refs/heads/main":     {"refs/heads/main", ""},
+		"main~1":              {"main", "~1"},
+		"refs/heads/main^2~3": {"refs/heads/main", "^2~3"},
+		"refs/tags/v1^{}":     {"refs/tags/v1", "^{}"},
+		"main@{1}":            {"main", "@{1}"},
+		"main:path/file":      {"main", ":path/file"},
+		"feature/x~1":         {"feature/x", "~1"},
+		"":                    {"", ""},
+	} {
+		base, suffix := splitRevisionSuffix(revision)
+		require.Equal(t, expected, [2]string{base, suffix}, revision)
+	}
 }
