@@ -68,7 +68,9 @@ func (s *Server) UserUpdateSubmodule(ctx context.Context, req *gitalypb.UserUpda
 				WithMetadata("old_object_id", expectedOldOID)
 		}
 	} else {
-		oldOID, err = quarantineRepo.ResolveRevision(ctx, referenceName.Revision())
+		// By its exact name: a missing branch must not resolve through a tag or another reference
+		// that git's DWIM rules would try after it.
+		oldOID, err = quarantineRepo.ResolveReferenceExactly(ctx, referenceName)
 		if err != nil {
 			if errors.Is(err, git.ErrReferenceNotFound) {
 				return nil, structerr.NewInvalidArgument("Cannot find branch")
@@ -203,11 +205,19 @@ func (l *legacyGit2GoSubmoduleAlreadyAtShaError) Error() string {
 func (s *Server) updateSubmodule(ctx context.Context, quarantineRepo *localrepo.Repo, req *gitalypb.UserUpdateSubmoduleRequest) (string, error) {
 	var treeID git.ObjectID
 
-	fullTree, err := quarantineRepo.ReadTree(
-		ctx,
-		git.NewReferenceNameFromBranchName(string(req.GetBranch())).Revision(),
-		localrepo.WithRecursive(),
-	)
+	// The tree and the parent of the new commit are those of the branch, read once by its exact
+	// name: git's DWIM rules would resolve the branch name to a tag of the same name before the
+	// branch, and a missing branch through a tag or another reference.
+	currentBranchCommit, err := quarantineRepo.ResolveReferenceExactly(ctx, git.NewReferenceNameFromBranchName(string(req.GetBranch())))
+	if err != nil {
+		if errors.Is(err, git.ErrReferenceNotFound) {
+			return "", fmt.Errorf("submodule: %s", legacyErrPrefixInvalidSubmodulePath)
+		}
+
+		return "", fmt.Errorf("resolving submodule branch: %w", err)
+	}
+
+	fullTree, err := quarantineRepo.ReadTree(ctx, currentBranchCommit.Revision(), localrepo.WithRecursive())
 	if err != nil {
 		if errors.Is(err, git.ErrReferenceNotFound) {
 			return "", fmt.Errorf("submodule: %s", legacyErrPrefixInvalidSubmodulePath)
@@ -258,10 +268,6 @@ func (s *Server) updateSubmodule(ctx context.Context, quarantineRepo *localrepo.
 	}
 
 	treeID = fullTree.OID
-	currentBranchCommit, err := quarantineRepo.ResolveRevision(ctx, git.Revision(req.GetBranch()))
-	if err != nil {
-		return "", fmt.Errorf("resolving submodule branch: %w", err)
-	}
 
 	authorSignature, err := git.SignatureFromRequest(req)
 	if err != nil {

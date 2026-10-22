@@ -408,18 +408,12 @@ func (s *Server) landReferenceMoved(ctx context.Context, repo *localrepo.Repo, r
 // branches the same way (localrepo.ResolveBranchesExactly). A symbolic branch resolves to the commit
 // of its target.
 func (s *Server) landBranchTip(ctx context.Context, repo *localrepo.Repo, reference git.ReferenceName) (git.ObjectID, error) {
-	reader, release, err := s.catfileCache.ObjectInfoReader(ctx, repo)
-	if err != nil {
-		return "", fmt.Errorf("creating object info reader: %w", err)
-	}
-	defer release()
-
-	branches, err := repo.ResolveBranchesExactly(ctx, reader, reference)
-	if err != nil {
-		return "", err
+	tip, err := s.resolveBranchCommitExactly(ctx, repo, reference)
+	if errors.Is(err, git.ErrReferenceNotFound) {
+		return "", nil
 	}
 
-	return branches[reference], nil
+	return tip, err
 }
 
 // landMergeConflictError returns the FailedPrecondition error for a change that does not apply

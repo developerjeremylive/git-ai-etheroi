@@ -183,6 +183,46 @@ func TestRepo_GetReference(t *testing.T) {
 	}
 }
 
+// TestRepo_ResolveReferenceExactly checks that a reference resolves only by its exact name, to its
+// own value: a missing refs/heads/x never resolves through a reference that git's DWIM rules try
+// after it, nor through a reference below its name; a reference at an annotated tag resolves to the
+// tag, as rev-parse of the reference does; and a symbolic branch to the commit of its target.
+func TestRepo_ResolveReferenceExactly(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+
+	commit := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("main"))
+	other := gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("other"))
+	for _, ref := range []git.ReferenceName{
+		"refs/refs/heads/x", "refs/tags/refs/heads/x", "refs/heads/refs/heads/x", "refs/remotes/refs/heads/x", "refs/heads/x/y",
+	} {
+		gittest.WriteRef(t, cfg, repoPath, ref, other)
+	}
+	tag := gittest.WriteTag(t, cfg, repoPath, "annotated", commit.Revision(), gittest.WriteTagConfig{Message: "annotated"})
+	// git writes only commits to branches; another reference may hold the tag itself.
+	gittest.WriteRef(t, cfg, repoPath, "refs/keep/at-tag", tag)
+	gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "refs/heads/symbolic", "refs/heads/main")
+
+	for _, tc := range []struct {
+		reference   git.ReferenceName
+		expected    git.ObjectID
+		expectedErr error
+	}{
+		{reference: "refs/heads/main", expected: commit},
+		{reference: "refs/heads/x", expectedErr: git.ErrReferenceNotFound},
+		{reference: "refs/keep/at-tag", expected: tag},
+		{reference: "refs/heads/symbolic", expected: commit},
+	} {
+		t.Run(tc.reference.String(), func(t *testing.T) {
+			oid, err := repo.ResolveReferenceExactly(ctx, tc.reference)
+			require.Equal(t, tc.expectedErr, err)
+			require.Equal(t, tc.expected, oid)
+		})
+	}
+}
+
 func TestRepo_GetReferenceWithAmbiguousRefs(t *testing.T) {
 	t.Parallel()
 

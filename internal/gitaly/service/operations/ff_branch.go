@@ -55,7 +55,9 @@ func (s *Server) UserFFBranch(ctx context.Context, in *gitalypb.UserFFBranchRequ
 				WithMetadata("old_object_id", expectedOldOID)
 		}
 	} else {
-		revision, err = quarantineRepo.ResolveRevision(ctx, referenceName.Revision())
+		// By its exact name: a missing branch must not resolve through a tag or another reference
+		// that git's DWIM rules would try after it.
+		revision, err = quarantineRepo.ResolveReferenceExactly(ctx, referenceName)
 		if err != nil {
 			return nil, structerr.NewInvalidArgument("%w", err)
 		}

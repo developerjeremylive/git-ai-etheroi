@@ -56,7 +56,9 @@ func (s *Server) UserDeleteBranch(ctx context.Context, req *gitalypb.UserDeleteB
 				WithMetadata("old_object_id", expectedOldOID)
 		}
 	} else {
-		referenceValue, err = repo.ResolveRevision(ctx, referenceName.Revision())
+		// By its exact name: a missing branch must not resolve through a tag or another reference
+		// that git's DWIM rules would try after it.
+		referenceValue, err = repo.ResolveReferenceExactly(ctx, referenceName)
 		if err != nil {
 			return nil, structerr.NewFailedPrecondition("branch not found: %q", req.GetBranchName())
 		}

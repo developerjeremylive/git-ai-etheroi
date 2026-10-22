@@ -170,6 +170,29 @@ func (repo *Repo) ResolveBranchesExactly(ctx context.Context, reader catfile.Obj
 	return resolved, nil
 }
 
+// ResolveReferenceExactly returns the object ID that reference points to, read by its exact name
+// with one for-each-ref, or git.ErrReferenceNotFound when it does not exist (also when references
+// below its name do, refs/heads/<x>/y). Unlike ResolveRevision, whose revision git resolves with
+// its DWIM rules, a missing refs/heads/<x> never resolves through refs/tags/refs/heads/<x> or
+// another reference. The value is not peeled: it is the value that a compare-and-swap of the
+// reference expects, as `git rev-parse <reference>` returns it when the reference exists. A
+// symbolic reference yields the object its target points to. ResolveBranchesExactly is the peeled
+// form, for the callers that want the commit.
+func (repo *Repo) ResolveReferenceExactly(ctx context.Context, reference git.ReferenceName) (git.ObjectID, error) {
+	// A pattern also matches the references below it, so only the exact name counts.
+	refs, err := repo.GetReferences(ctx, reference.String())
+	if err != nil {
+		return "", fmt.Errorf("reading %q: %w", reference, err)
+	}
+	for _, ref := range refs {
+		if ref.Name == reference && ref.Target != "" {
+			return git.ObjectID(ref.Target), nil
+		}
+	}
+
+	return "", git.ErrReferenceNotFound
+}
+
 // GetReference looks up and returns the given reference. Returns a
 // ReferenceNotFound error if the reference was not found.
 func (repo *Repo) GetReference(ctx context.Context, reference git.ReferenceName) (git.Reference, error) {
