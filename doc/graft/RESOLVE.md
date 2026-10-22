@@ -789,13 +789,26 @@ OpenRouter and splits `--max-usd` between them; its report counts the held answe
 server together (see "Version skew" above: a `graft-resolve` with `agree_with` gives no model's resolution to a server that
 does not announce `hold`).
 
-What it was worth, measured on 487 held-out files of 13 open-source repositories (Luna and glm-5.3-flash, with the
-verify simulation of the bench in place of the operator's tests): 59.8% of the files landed, and 15.5% of those differed
-from what two independent reviewing models accept (11.3% for one of them; Wilson upper bound 20.1% for both), and at most 15.5% from
-what a third one, from another vendor, accepts (upper bound 20.1%; it is a ceiling, 15 of its 291 verdicts are missing and counted as wrong), against 43% to 52% on conflicts of merged agent PRs. These figures were measured by combining two separate single-model runs, which is what
-the gate decides; the gate in the code is covered by tests with fake providers, not re-measured through itself (PLAN10
-15.12). They are before the operator's own tests, which are the one signal that caught more errors where we could run
-them. Cost: two model calls per region.
+What it was worth. The operating point that the measurements support is: **two writers from different vendors that
+give the same answer, and the project's own tests or build passing on the exact tree** (`verify.command`). It was
+measured on conflicts of open-source repositories that no run had seen, with the gate's two writers (Luna and
+glm-5.3-flash); "wrong" is the share of the landed answers that are not a correct merge of the two sides, with the
+Wilson upper bound in parentheses (PLAN10 [15.15 to 15.24](PLAN10.md)):
+
+* **Go**, with the tests: 7.7% wrong (upper bound 16.8%) on conflicts never seen before, replicated on a second set
+  (8.2% pooled, upper bound 14.1%); with only a successful build of the package: 6.8% (14.9%).
+* **Python**, under the PM label: with the tests 3.2% (7.2%); without tests, with the abstention on semantic conflicts
+  (a side changes what the other side's code uses): 5.9% (9.2%).
+* **TypeScript and JavaScript**, under the PM label: with the tests 4.1% (8.6%); with the project's type check 4.9%
+  (9.7%). Without tests it is **not verified**: the label did not pass its calibration on TypeScript (78% against the 80% it
+  required).
+
+The limits, in one line: the reference of the Python and TypeScript figures is an AI reviewer (Claude) with a written
+rubric, calibrated blind on Go but not a human; the first judges (three models that compare with the developer's
+file) over-counted the errors (an audit found 18 of 25 flagged Python answers to be artifacts of that reference), so
+the earlier, higher figures are not the ones to quote; and conflicts of merged agent PRs were not measured with the
+tests. The figures combine two separate single-model runs, which is what the gate decides; the gate in the code is
+covered by tests with fake providers, not re-measured through itself. Cost: two model calls per region.
 
 **Version skew between the server and `graft-resolve`.** A resolution is a rule's only if its file says so (`origin`
 `"rule"`, protocol v1); a file without an origin is a model's, which lands only through `verify.command`.
