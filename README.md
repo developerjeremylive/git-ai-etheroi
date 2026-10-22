@@ -138,7 +138,7 @@ and all 250 changes land (1,245-1,806 lands per minute, p99 2.0-3.4 s). Details 
 
 ## Status
 
-Version 0.3.0. Everything above is implemented and covered by unit,
+Version 0.3.1. Everything above is implemented and covered by unit,
 end-to-end, multi-node, crash and fuzz tests. Interfaces may still change
 before 1.0. Known gaps (for example garbage collection of packs in the storage
 core) are listed in [LIMITATIONS.md](doc/graft/LIMITATIONS.md).
