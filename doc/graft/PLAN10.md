@@ -2522,6 +2522,48 @@ the PM label calls 17 of the 18 artifacts right and 3 of the 4 real or minor one
 under either label (G1 7.3% against T 3.2% on the PM label; 17.5% against 15.9% on v1). A statement the evidence supports: *if a correct merge is what matters, Python answers that two writers from different vendors produce identically and that pass py_compile and pyflakes are wrong in about 7% of cases (upper bound 10.6%), as measured by an AI reviewer with a written rubric*;
 it does not support the same sentence for a human reviewer, and it does not replace a human sample, which would be the next step if the claim is to be quoted.
 
+### 15.24 TypeScript and JavaScript: the run, with the PM label ($0.48 booked)
+
+**The answer.** 15.20 and 15.21 describe the state before this run. The hashed protocol of 15.20 was applied with one change decided by Federico ("Giudica tu"): the label is the PM label of 15.23 (blind Claude Opus reviewers, a written rubric, the objective rule), not the three LLM judges. On 549 files
+that no run, judge or gate had seen (prettier, trpc, nest, redux-toolkit, merges since 2021), G1 lands 323 (58.8%). **With the tests (T) 148 files are 4.1% wrong (upper bound 8.6%); with the project-level type check 144 files are 4.9% wrong (upper 9.7%): both rules are met, with and without prettier.** The no-tests figure
+(G1 alone: 323 files, 12.7% wrong, upper 16.8%; without prettier 181 files, 8.3%, upper 13.2%) is numerically under the bar, but **the PM label failed its pre-registered calibration on TypeScript (78.3% against 80%), so the protocol allows no claim from that line.** It is an AI reference, not a human one.
+
+**Protocol** (`run/gate-b/PROTOCOL-TS.txt`, sha256 `dcf8da2f22e2`, with Amendment 1 `260e730a2c0f` (the PM label instead of judges 1-3; writers capped at $0.35 each, $0.7 in all), Amendment 2 `325726525aad` (the calibration on TypeScript, written before any verdict) and
+Amendment 3 `d7917c5a0fee` (a developer's file that does not exist made the test stage stop with an exception after 303 of 323 answers; the answer is labelled WRONG as in every label, the stage resumed for the other 20)):
+* *Set:* `mine/manifest-tsfresh.json` (sha256 `b849e6fdda1d`): 549 files, 200 merges; no overlap with any earlier manifest. *Writers:* Luna and glm-5.3-flash, the configurations of 15.16. *G1:* byte-identical answers, clean composition reports, the verify simulator (tsc of the file alone, differential).
+* *Tests and type check* (`test_gate_ts.py`, sha256 `ce9641842a5f`, `--mode both`, one pinned core at nice 19, about 10 hours): the runner's own related-tests selection (jest, vitest; the unit specs that import the module for mocha), the differential of 15.15 with a flaky-test rule (a test that fails with the answer twice is a break only if it passes on a third run with the
+  developer's file; it was used 4 times), and `tsc --noEmit -p` of the tsconfig program that contains the file, the diagnostics compared without line and column.
+* *Label:* identical to the developer's file is correct; **tests or tsc FAIL where the developer's file passes is wrong, by code, first**; equal ignoring blank lines and whitespace is correct; the others (117) were judged blind by four Claude Opus reviewers on case files from the frozen `v2core.py` (regions with BASE/OURS/THEIRS and the two
+  resolutions, and every difference outside the regions; no verdict, no test or tsc status), in batches of 29-30, with the rubric of 15.23. A second blind reviewer re-judged every 5th case (23): 22 agree (95.7%, kappa 0.91), the disagreement counts as wrong. UNCLEAR counts as wrong (none occurred). Verdicts: 83 correct, 34 wrong (rule 4, a change not adapted next to the conflict, 25 of them; 22 in prettier).
+* *Prediction written before the data:* G1 4-12% wrong, T 80-170 files at 2-8%, TSC 40-90 files at 3-10%, the three rules likely met. T (148, 4.1%) and TSC (144, 4.9%) were as predicted in size and rate; G1 alone, 12.7%, was slightly above the predicted range.
+
+**Cost.** Luna $0.2478 booked ($0.2366 on the key), glm $0.2363 ($0.2202): **$0.484 booked, $0.457 on the key**, against a hard cap of $0.7. No judge was paid; the reviewers cost no API spend.
+
+**The result** (wrong = not a correct merge by the label; Wilson upper bound in parentheses; N of at least 54 and an upper bound of 20% or less):
+
+| rule | N | PM label wrong | answers that differ from the developer | rule |
+|---|---:|---|---|---|
+| NO-TESTS: G1 | 323 | 41 = 12.7% (16.8) | 131 = 40.6% | met, **but the label is not calibrated on TS: no claim** |
+| NO-TESTS, without prettier | 181 | 15 = 8.3% (13.2) | 81 = 44.8% | same |
+| **TESTS: T (tests PASS)** | **148** | **6 = 4.1% (8.6)** | 42 = 28.4% | **met** |
+| TESTS, without prettier | 83 | 3 = 3.6% (10.1) | 34 = 41.0% | met |
+| **TSC: tsc PASS** | **144** | **7 = 4.9% (9.7)** | 59 = 41.0% | **met** (TypeScript files only, so without prettier it is the same set) |
+
+By repository (G1-landed, PM wrong): prettier 26 of 142, trpc 9 of 71, nest 4 of 64, redux-toolkit 2 of 46. Test statuses of the 323: PASS 148, FAIL 28, R-NOBASETESTS 80, R-BASEBUILD 37, R-INSTALL 30 (trpc merges of the yarn era and an engines constraint of pnpm; two of nest). The type check: PASS 144, FAIL 5, not covered 144 (the
+JavaScript of prettier and files outside a tsconfig program), not run 30 (the installs). 192 of the 323 answers are identical to the developer's file.
+
+**The calibration on TypeScript** (Amendment 2): the answers that fail by execution are wrong by fact; their case files went to the reviewers mixed with the rest, unmarked. 30 answers fail (tests 28, tsc 5); 23 were reviewed blind (the other 7 are equal ignoring whitespace or have no case file). **The reviewers judged 18 of the 23 wrong: 78.3%, under the 80% criterion: not calibrated.**
+The five misses (listed with the reviewer's reason in `run/tsfresh/report-pm.txt`): two exports or arguments kept from both sides that the reviewer read as equivalent to the developer's, and three merges where the developer made a change outside the regions (a parameter, a cast replaced by an explicit generic argument) that the reviewer read as
+equivalent typing. The sensitivity is also understated by answers that fail for a reason
+the case file does not show, and it says nothing about the wrong answers that pass the tests, which is where TESTS and TSC are decided. The miss by two cases (19 were needed) is on a sample of 23.
+
+**Reading and caveats.**
+1. *The claim that the evidence supports:* for TypeScript/JavaScript repositories whose tests or tsconfig can be run on the resolved tree, an answer that two writers produce identically and that passes the project's tests (or its type check) is wrong in about 4-5% of cases (upper bound under 10%), as judged by an AI reviewer with a written rubric, against the three sides. It is not a human ground truth.
+2. *The label is not validated on a human reference on TypeScript* and failed its calibration here by two cases; the tests and tsc arms depend less on it (the objective rule decides every failure; the reviewers decide the answers that pass), but the 6 and 7 wrong answers they report are the reviewers' judgement.
+3. *Coverage is the condition:* of the 323 answers 148 pass the tests; the rest are not covered (no related test 80, a baseline that does not build 37, an environment that does not install 30, failing 28). The G1 answers outside T carry 35 of the 41 wrong ones. As in Go, the tests make the answer safer where they exist.
+4. *Prettier is the weak repository* (26 of 142 wrong, 22 of them rule 4): its source is JavaScript with no type check and its formatter tests relate to few files; without prettier the no-tests figure is 8.3%.
+5. *First application of the PM label to data it was not designed on*, but it was calibrated only on Go and checked here by a criterion that it missed. The comparison with v1 does not exist on TypeScript (no judge was run).
+
 ### Appendix A: the measurement log of section 15
 
 What was run, when, on what, at what cost. Data, scripts and reports are in `c1-work/` (outside the repository:
@@ -2556,6 +2598,7 @@ read from the key before and after each run and agrees, except where stated.
 | 22 | the TypeScript preparation of 15.20: the harness, the recipes on 3 merges per repository, the mutation check, the hashed protocol; 1,028 more cases mined; **never applied** (stopped) | manifest-tsfresh (549), PROTOCOL-TS (dcf8da2f22e2) | scripts/test_gate_ts.py, tsrun.sh, ts_ids.py, ts_report.py outside the repository | $0 |
 | 22 | label v2b of 15.22: validation on the PM's audit sets (27 Go held-out wrong, 40 right answers drawn, 56 judge calls) with the objective rule, judges 1 and 2 and judge 3 on disagreements; diagnostic call; re-run of 8 judge-3 calls (Amendment 2); **not validated, application not run** | PROTOCOL-LABEL2 (62b059bcc29b) and Amendments 1, 2, 2b | scripts/v2core.py, v2_judge.py, v2run.sh, v2_report.py outside the repository | $0.0087 + $0.1776 + $0.4201 + $0.0132 = $0.620 booked |
 | 22 | the PM label of 15.23: 118 pyfresh answers judged by four blind Claude Opus reviewers with a written rubric, a 20% second review (22 of 23 agree), a post-hoc calibration on 36 Go cases (10 of 11 real errors rejected, 17 of 19 right accepted); gates scored by `score.py` | PROTOCOL-PMJUDGE (b99630b8e01c), PROTOCOL-PMJUDGE-CALIB (1b0cc7373ed7) | run/pmjudge-pm/ (score.py ad04280ef7), outside the repository | $0 |
+| 22 | the TypeScript run of 15.24: Luna and glm on 549 files, G1 (323), the differential tests and the project-level type check (one pinned core, about 10 h), 117 case files judged by four blind Claude Opus reviewers with a 20% second review (22 of 23), calibration on TypeScript (18 of 23: not calibrated) | PROTOCOL-TS (dcf8da2f22e2) and Amendments 1-3 | scripts/tsrun.sh, test_gate_ts.py, ts_cases.py, ts_report_pm.py outside the repository | $0.2478 + $0.2363 = $0.484 booked ($0.457 on the key) |
 | 20 | the agree_with gate through fake providers and the real graft-resolve with two fake command models | tests only | 3cc898c | $0 |
 
 **Why a screened model is skipped.** The screening is a smoke check of five cases (a go, a java, a python, a
