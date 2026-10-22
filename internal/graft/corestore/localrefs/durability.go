@@ -165,6 +165,9 @@ type Durability struct {
 	sync func(f *os.File) error
 	// crashAt is the crash point selected with CrashEnv.
 	crashAt string
+	// watermark returns the path of the watermark of the repository at repoPath;
+	// nil unless the syncer may write it without fsync (WithWatermark).
+	watermark func(repoPath string) string
 
 	// ownerFiles hold the owner locks, taken by TryOwn. owner is set by
 	// Activate once the process has recovered the storages: from then on its
@@ -274,6 +277,13 @@ func WithBootID(bootID string) DurabilityOption {
 // simulate a write the kernel failed to do.
 func WithSync(sync func(f *os.File) error) DurabilityOption {
 	return func(d *Durability) { d.sync = sync }
+}
+
+// WithWatermark lets the syncer write the watermark of a dirty repository
+// without fsync (DefersWatermark); path returns the watermark of a repository,
+// which the durable step then makes durable before the marker goes.
+func WithWatermark(path func(repoPath string) string) DurabilityOption {
+	return func(d *Durability) { d.watermark = path }
 }
 
 // NewDurability returns the deferred durability of the node, or nil when the
@@ -595,6 +605,27 @@ func (d *Durability) Dirty() []string {
 	return paths
 }
 
+// DefersWatermark reports whether the watermark of the repository at path may be
+// written without fsync now: the repository is dirty and trusted, so its marker
+// is durable, and the marker goes only after a durable step made the watermark
+// durable (syncWatermark). The caller holds the syncer's repository lock.
+func (d *Durability) DefersWatermark(path string) bool {
+	if !d.Deferring() || d.watermark == nil {
+		return false
+	}
+
+	// A repository without a stack has no durable step of its references: its
+	// watermark is written with fsync.
+	if stack, err := hasStack(path); err != nil || !stack {
+		return false
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st := d.repos[path]
+	return st != nil && st.dirty && st.untrusted == nil
+}
+
 // RepoOf returns the repository whose state is kept for path.
 func (d *Durability) RepoOf(path string) (RepoRef, bool) {
 	if d == nil {
@@ -658,12 +689,19 @@ func (d *Durability) Settle(path string, final bool) error {
 		return err
 	}
 	if !dirty || !stack {
-		// A repository without a stack (gone, or not reftable) has nothing to
-		// make durable; a clean state only leaves the map. A transaction that
+		// A repository without a stack (gone, or not reftable) has no references
+		// to make durable; a clean state only leaves the map. A transaction that
 		// marked a repository with a stack meanwhile leaves it to the next step,
 		// under git's reference lock (dropMarker refuses otherwise).
 		st := d.lockState(path)
 		defer st.file.Unlock()
+		if dirty {
+			// Its watermark may have been written without fsync while it had a
+			// stack.
+			if err := d.syncWatermark(path); err != nil {
+				return d.stepErrorLocked(st, repo, path, err)
+			}
+		}
 		_, err := d.dropMarker(path, st, false)
 		return err
 	}
@@ -677,6 +715,13 @@ func (d *Durability) Settle(path string, final bool) error {
 		return nil
 	}
 
+	// The watermark is made durable before git's reference lock is taken, so that
+	// its fsync does not hold the transactions of the repository.
+	if err := d.syncWatermark(path); err != nil {
+		st := d.lockState(path)
+		defer st.file.Unlock()
+		return d.stepErrorLocked(st, repo, path, err)
+	}
 	lock, ok, err := lockStack(path)
 	if err != nil {
 		return err
@@ -1065,6 +1110,28 @@ func (d *Durability) syncStack(path string, st *refState) error {
 	return nil
 }
 
+// syncWatermark makes the watermark of the repository at path and its directory
+// durable, when the syncer writes it without fsync (WithWatermark) and the
+// repository has one. The callers decide the marker after it, and hold the
+// syncer's repository lock, under which the syncer writes the watermark: it
+// cannot change before the marker goes.
+func (d *Durability) syncWatermark(path string) error {
+	if d.watermark == nil {
+		return nil
+	}
+
+	file := d.watermark(path)
+	for _, p := range []string{file, filepath.Dir(file)} {
+		if err := d.syncPath(p); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 // Tracked returns the paths of the repositories that have a state: the dirty
 // ones and the clean ones that a live git process still counts on. The durable
 // steps visit them all, so that a clean state leaves the map once its last
@@ -1147,13 +1214,18 @@ func (d *Durability) Forget(ctx context.Context, repo RepoRef, path string) erro
 }
 
 // forgetLocked lets dropMarker decide the marker of a forgotten repository.
-// One kept in place is made durable under git's reference lock first, as a
-// durable step does; when the lock is busy the marker stays for the next step.
-// The caller holds the state's file lock.
+// Its watermark is made durable first. One kept in place is then made durable
+// under git's reference lock, as a durable step does; when the lock is busy the
+// marker stays for the next step. The caller holds the state's file lock and the
+// syncer's repository lock.
 func (d *Durability) forgetLocked(path string, st *refState, repo RepoRef) (bool, error) {
 	stack, err := hasStack(path)
 	if err != nil {
 		return false, err
+	}
+	// The watermark goes first, outside git's reference lock, as in Settle.
+	if err := d.syncWatermark(path); err != nil {
+		return false, d.stepErrorLocked(st, repo, path, err)
 	}
 	if !stack {
 		return d.dropMarker(path, st, false)

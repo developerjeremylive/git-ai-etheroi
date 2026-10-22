@@ -39,6 +39,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/graft/corestore/checkpoint"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/gate"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/gc"
+	"github.com/feder-cr/git-ai/internal/graft/corestore/gitops"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/localrefs"
 	storagemaintenance "github.com/feder-cr/git-ai/internal/graft/corestore/maintenance"
 	corestoreopen "github.com/feder-cr/git-ai/internal/graft/corestore/open"
@@ -1005,7 +1006,8 @@ func openLocalReferenceWrites(core *corestore.Core, locator storage.Locator, log
 	core.RefAdmission = localrefs.NewAdmission(lockTimeout, lockTimeout)
 	prometheus.MustRegister(core.RefAdmission)
 
-	durability, err := localrefs.NewDurability(locator, localrefs.DurableStepIdle)
+	durability, err := localrefs.NewDurability(locator, localrefs.DurableStepIdle,
+		localrefs.WithWatermark(gitops.WatermarkPath))
 	if err != nil {
 		return fmt.Errorf("graft storage core: %w", err)
 	}

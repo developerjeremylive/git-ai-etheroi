@@ -50,7 +50,10 @@ maintenance). Where they differ, PLAN7.md is the later decision.
   link(2), because gocloud's file driver does not make its own create-only write
   atomic (it checks that the key is absent, then renames onto it, so two writers
   of one key would both succeed). A file bucket therefore needs a filesystem
-  with hard links. A changeset never references a pack that is not completely
+  with hard links. Never remove or replace a directory of a file bucket while a
+  server uses the bucket: a node remembers which directories it has made
+  durable, by inode, and a directory created again could reuse an inode it
+  remembers. A changeset never references a pack that is not completely
   uploaded. Changesets written by v0.1.0 keep their keys
   (`repos/<repo_id>/packs/<sha256>.pack`, shared by identical packs), which
   stay readable; the database refuses such a key in a new changeset, so every
@@ -591,7 +594,9 @@ or re-import the repository from scratch (see
   them durable in a background step a second after a repository goes idle
   (`doc/graft/PLAN7.md`, LOCAL REFERENCE WRITES RULE). Until then the
   repository has a dirty marker in `<storage>/+gitaly/graft-ref-durability/`,
-  which holds the kernel's boot identity.
+  which holds the kernel's boot identity. The watermark of a dirty repository is
+  written without fsync too, and the background step makes it durable before it
+  removes the marker.
   - *Process crash or restart* (same kernel boot): nothing is lost, because the
     page cache kept every write. The restarted node settles the markers.
   - *Kernel crash or power loss*: the references written since the last durable

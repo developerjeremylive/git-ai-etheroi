@@ -405,6 +405,205 @@ func TestSettleReportsAFailedWriteAsUntrusted(t *testing.T) {
 	require.Equal(t, 0.0, testutil.ToFloat64(d.dirty))
 }
 
+// testWatermarkPath is gitops.WatermarkPath, the watermark of the syncer.
+func testWatermarkPath(repoPath string) string {
+	return filepath.Join(repoPath, "graft", "storage", "applied")
+}
+
+// TestDurabilityDefersTheWatermarkOfADirtyRepository checks that the watermark
+// is written without fsync only by the owner configured with WithWatermark, and
+// only for a trusted dirty repository with a reftable stack, whose durable step
+// makes it durable.
+func TestDurabilityDefersTheWatermarkOfADirtyRepository(t *testing.T) {
+	t.Parallel()
+
+	t.Run("without the option", func(t *testing.T) {
+		t.Parallel()
+		f := setupDurability(t)
+		d := f.durability(t, "boot-a", 0)
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		require.False(t, d.DefersWatermark(f.path))
+	})
+
+	t.Run("while the repository is dirty", func(t *testing.T) {
+		t.Parallel()
+		f := setupDurability(t)
+		d := f.durability(t, "boot-a", 0, WithWatermark(testWatermarkPath))
+
+		require.False(t, d.DefersWatermark(f.path), "a clean repository")
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		require.True(t, d.DefersWatermark(f.path))
+		require.NoError(t, d.Settle(f.path, false))
+		require.False(t, d.DefersWatermark(f.path), "the marker is gone")
+	})
+
+	t.Run("an untrusted repository", func(t *testing.T) {
+		t.Parallel()
+		f := setupDurability(t)
+		d := f.durability(t, "boot-a", 0, WithWatermark(testWatermarkPath))
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		f.synced.fail(errors.New("input/output error"))
+		require.ErrorIs(t, d.Settle(f.path, false), ErrUntrusted)
+		require.False(t, d.DefersWatermark(f.path))
+	})
+
+	t.Run("a repository without a stack", func(t *testing.T) {
+		t.Parallel()
+		f := setupDurability(t)
+		d := f.durability(t, "boot-a", 0, WithWatermark(testWatermarkPath))
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		require.NoError(t, os.Rename(filepath.Join(f.path, "reftable"), filepath.Join(t.TempDir(), "reftable")))
+		require.False(t, d.DefersWatermark(f.path))
+	})
+
+	t.Run("a process that does not own the storage", func(t *testing.T) {
+		t.Parallel()
+		f := setupDurability(t)
+		d := f.unowned(t, "boot-a", 0, WithWatermark(testWatermarkPath))
+
+		require.False(t, d.DefersWatermark(f.path))
+	})
+
+	t.Run("a nil durability", func(t *testing.T) {
+		t.Parallel()
+		var d *Durability
+		require.False(t, d.DefersWatermark("/any"))
+	})
+}
+
+// TestDurableStepMakesTheWatermarkDurableBeforeTheMarkerGoes checks that a
+// durable step and Forget fsync the watermark that the syncer wrote without
+// fsync, and its directory, while the marker is still there, and outside git's
+// reference lock, which the transactions of the repository wait for. A
+// repository without a stack gets the same.
+func TestDurableStepMakesTheWatermarkDurableBeforeTheMarkerGoes(t *testing.T) {
+	t.Parallel()
+
+	// watermarkSync is what the fsync of the watermark found.
+	type watermarkSync struct {
+		synced bool
+		// marker and gitLock tell whether the dirty marker and git's reference
+		// lock existed then.
+		marker, gitLock bool
+	}
+	setup := func(t *testing.T) (durabilityFixture, *Durability, string, *watermarkSync) {
+		f := setupDurability(t)
+		watermark := testWatermarkPath(f.path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(watermark), 0o755))
+		require.NoError(t, os.WriteFile(watermark, []byte(`{"repo_id":1,"seq":2}`), 0o644))
+
+		var found watermarkSync
+		var d *Durability
+		d = f.durability(t, "boot-a", 0, WithWatermark(testWatermarkPath), WithSync(func(file *os.File) error {
+			if file.Name() == watermark {
+				found.synced = true
+				_, err := os.Stat(f.markerPath(t, d))
+				found.marker = err == nil
+				_, err = os.Stat(filepath.Join(f.path, "reftable", "tables.list.lock"))
+				found.gitLock = err == nil
+			}
+			return f.synced.sync(file)
+		}))
+		return f, d, watermark, &found
+	}
+
+	t.Run("settle", func(t *testing.T) {
+		t.Parallel()
+		f, d, watermark, found := setup(t)
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		require.NoError(t, d.Settle(f.path, false))
+
+		recorded := f.synced.recorded()
+		require.Contains(t, recorded, watermark)
+		require.Contains(t, recorded, filepath.Dir(watermark))
+		require.Equal(t, watermarkSync{synced: true, marker: true}, *found,
+			"the watermark is durable before the marker goes, and its fsync does not hold git's lock")
+		require.NoFileExists(t, f.markerPath(t, d))
+	})
+
+	t.Run("forget", func(t *testing.T) {
+		t.Parallel()
+		f, d, watermark, found := setup(t)
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		require.NoError(t, d.Forget(f.ctx, f.repo, f.path))
+
+		require.Contains(t, f.synced.recorded(), watermark)
+		require.Equal(t, watermarkSync{synced: true, marker: true}, *found)
+		require.NoFileExists(t, f.markerPath(t, d))
+	})
+
+	t.Run("a step that is not due", func(t *testing.T) {
+		t.Parallel()
+		f := setupDurability(t)
+		watermark := testWatermarkPath(f.path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(watermark), 0o755))
+		require.NoError(t, os.WriteFile(watermark, []byte(`{"repo_id":1,"seq":2}`), 0o644))
+		d := f.durability(t, "boot-a", time.Hour, WithWatermark(testWatermarkPath))
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		require.NoError(t, d.Settle(f.path, false))
+		require.NotContains(t, f.synced.recorded(), watermark, "the marker stays, so the watermark need not be durable yet")
+		require.FileExists(t, f.markerPath(t, d))
+	})
+
+	for _, forget := range []bool{false, true} {
+		desc := "a repository without a stack, settled"
+		if forget {
+			desc = "a repository without a stack, forgotten"
+		}
+		t.Run(desc, func(t *testing.T) {
+			t.Parallel()
+			f, d, watermark, found := setup(t)
+
+			// The syncer wrote the watermark without fsync while the repository had a
+			// stack, which has gone since.
+			require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+			require.True(t, d.DefersWatermark(f.path))
+			require.NoError(t, os.Rename(filepath.Join(f.path, "reftable"), filepath.Join(t.TempDir(), "reftable")))
+
+			if forget {
+				require.NoError(t, d.Forget(f.ctx, f.repo, f.path))
+			} else {
+				require.NoError(t, d.Settle(f.path, false))
+			}
+
+			require.Contains(t, f.synced.recorded(), watermark)
+			require.Contains(t, f.synced.recorded(), filepath.Dir(watermark))
+			require.Equal(t, watermarkSync{synced: true, marker: true}, *found)
+			require.NoFileExists(t, f.markerPath(t, d))
+		})
+	}
+
+	t.Run("a failed fsync of the watermark", func(t *testing.T) {
+		t.Parallel()
+		f, d, _, _ := setup(t)
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		f.synced.mu.Lock()
+		f.synced.failOnly = filepath.Join("graft", "storage")
+		f.synced.mu.Unlock()
+		f.synced.fail(errors.New("input/output error"))
+
+		require.ErrorIs(t, d.Settle(f.path, false), ErrUntrusted)
+		require.FileExists(t, f.markerPath(t, d))
+	})
+
+	t.Run("no watermark", func(t *testing.T) {
+		t.Parallel()
+		f, d, watermark, _ := setup(t)
+		require.NoError(t, os.RemoveAll(filepath.Dir(watermark)))
+
+		require.NoError(t, d.MarkDirty(f.ctx, f.repo, f.path))
+		require.NoError(t, d.Settle(f.path, false))
+		require.NoFileExists(t, f.markerPath(t, d))
+	})
+}
+
 // TestUntrustedSurvivesAProcessRestart verifies that the untrusted state is in
 // the marker: a restart of the process in the same boot, whose fsyncs then
 // succeed, finds the repository untrusted and never settles it.

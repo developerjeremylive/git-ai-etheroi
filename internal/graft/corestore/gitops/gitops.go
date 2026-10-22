@@ -930,11 +930,30 @@ func ReadWatermark(repoPath string) (w corestore.Watermark, ok bool, err error) 
 
 // WriteWatermark writes the watermark atomically (temporary file, fsync,
 // rename, fsync of the directory), creating graft/storage when needed.
-func WriteWatermark(repoPath string, w corestore.Watermark) (returnedErr error) {
+func WriteWatermark(repoPath string, w corestore.Watermark) error {
 	dir := filepath.Dir(WatermarkPath(repoPath))
 	if err := os.MkdirAll(dir, mode.Directory); err != nil {
 		return fmt.Errorf("write watermark: %w", err)
 	}
+	return writeWatermarkFile(repoPath, w, true)
+}
+
+// WriteWatermarkWithoutSync writes the watermark atomically (temporary file,
+// rename) without fsync, for a repository whose durable step makes it durable
+// later (localrefs.Durability.DefersWatermark). When graft/storage is missing it
+// writes as WriteWatermark does, so that the directory it creates is durable.
+func WriteWatermarkWithoutSync(repoPath string, w corestore.Watermark) error {
+	if _, err := os.Stat(filepath.Dir(WatermarkPath(repoPath))); err != nil {
+		return WriteWatermark(repoPath, w)
+	}
+	return writeWatermarkFile(repoPath, w, false)
+}
+
+// writeWatermarkFile writes the watermark into graft/storage, which exists,
+// through a temporary file and a rename; sync fsyncs the file before the rename
+// and the directory after it.
+func writeWatermarkFile(repoPath string, w corestore.Watermark, sync bool) (returnedErr error) {
+	dir := filepath.Dir(WatermarkPath(repoPath))
 
 	data, err := json.Marshal(w)
 	if err != nil {
@@ -956,14 +975,19 @@ func WriteWatermark(repoPath string, w corestore.Watermark) (returnedErr error) 
 	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write watermark: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync watermark: %w", err)
+	if sync {
+		if err := tmp.Sync(); err != nil {
+			return fmt.Errorf("sync watermark: %w", err)
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close watermark: %w", err)
 	}
 	if err := os.Rename(tmp.Name(), WatermarkPath(repoPath)); err != nil {
 		return fmt.Errorf("rename watermark: %w", err)
+	}
+	if !sync {
+		return nil
 	}
 
 	d, err := os.Open(dir)

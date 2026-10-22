@@ -23,6 +23,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
 	"github.com/feder-cr/git-ai/internal/graft/corestore"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/blobstore"
+	"github.com/feder-cr/git-ai/internal/graft/corestore/gitops"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/localrefs"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/sqlstore"
 	"github.com/stretchr/testify/require"
@@ -212,7 +213,11 @@ func EnableLocalRefs(tb testing.TB, core *corestore.Core, cfg config.Cfg, opts .
 		require.NoError(tb, core.RefDurability.Close())
 	}
 	core.RefAdmission = localrefs.NewAdmission(10*time.Second, 10*time.Second)
-	durability, err := localrefs.NewDurability(config.NewLocator(cfg), 0, append([]localrefs.DurabilityOption{localrefs.WithBootID(TestBootID), localrefs.WithRecoveryGrace(0)}, opts...)...)
+	durability, err := localrefs.NewDurability(config.NewLocator(cfg), 0, append([]localrefs.DurabilityOption{
+		localrefs.WithBootID(TestBootID),
+		localrefs.WithRecoveryGrace(0),
+		localrefs.WithWatermark(gitops.WatermarkPath),
+	}, opts...)...)
 	require.NoError(tb, err)
 	// A git process forked at the moment a previous durability closed its lock
 	// holds a copy of it until it execs (close-on-exec): the lock can be busy for
