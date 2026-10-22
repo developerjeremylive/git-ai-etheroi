@@ -107,6 +107,30 @@ func (rr *Repo) ResolveBranch(ctx context.Context, branch string) (git.ObjectID,
 // git.ErrReferenceNotFound when the reference does not exist (also when references below its name
 // do) or does not peel to a commit.
 func (rr *Repo) ResolveReference(ctx context.Context, name git.ReferenceName) (git.ObjectID, error) {
+	target, err := rr.referenceTarget(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if target == "" {
+		return "", git.ErrReferenceNotFound
+	}
+
+	// The object ID read above, peeled as `<name>^{commit}` is: an object ID is never
+	// resolved through a reference.
+	return rr.ResolveRevision(ctx, git.Revision(target)+"^{commit}")
+}
+
+// ReferenceExists will dial to the remote repository and report whether the reference exists under
+// its exact name name, with no DWIM rule.
+func (rr *Repo) ReferenceExists(ctx context.Context, name git.ReferenceName) (bool, error) {
+	target, err := rr.referenceTarget(ctx, name)
+	return target != "", err
+}
+
+// referenceTarget returns the object ID that the reference named name points to, read by its exact
+// name with ListRefs, or an empty string when it does not exist (also when references below its
+// name do).
+func (rr *Repo) referenceTarget(ctx context.Context, name git.ReferenceName) (string, error) {
 	// ListRefs matches references below the pattern too: only the exact name counts.
 	stream, err := gitalypb.NewRefServiceClient(rr.conn).ListRefs(ctx, &gitalypb.ListRefsRequest{
 		Repository: rr.Repository,
@@ -130,13 +154,8 @@ func (rr *Repo) ResolveReference(ctx context.Context, name git.ReferenceName) (g
 			}
 		}
 	}
-	if target == "" {
-		return "", git.ErrReferenceNotFound
-	}
 
-	// The object ID read above, peeled as `<name>^{commit}` is: an object ID is never
-	// resolved through a reference.
-	return rr.ResolveRevision(ctx, git.Revision(target)+"^{commit}")
+	return target, nil
 }
 
 // HasBranches will dial to the remote repository and check whether the repository has any branches.

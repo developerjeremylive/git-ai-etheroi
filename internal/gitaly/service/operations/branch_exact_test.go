@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -213,6 +215,25 @@ func TestUserDeleteBranchResolvesBranchesExactly(t *testing.T) {
 			requireDecoyUntouched(t, cfg, repoPath, decoy, decoyCommit)
 		})
 	}
+
+	t.Run("a branch whose object is missing", func(t *testing.T) {
+		t.Parallel()
+
+		// The branch exists under its exact name, so it can be deleted, whatever it points to.
+		repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
+		gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch(git.DefaultBranch))
+		doomed := gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("doomed"))
+		gittest.WriteRef(t, cfg, repoPath, "refs/heads/broken", doomed)
+		require.NoError(t, os.Remove(filepath.Join(repoPath, "objects", doomed.String()[:2], doomed.String()[2:])))
+
+		_, err := client.UserDeleteBranch(ctx, &gitalypb.UserDeleteBranchRequest{
+			Repository: repo,
+			User:       gittest.TestUser,
+			BranchName: []byte("broken"),
+		})
+		require.NoError(t, err)
+		require.Empty(t, exactReferenceValue(t, cfg, repoPath, "refs/heads/broken"), "the branch is deleted")
+	})
 
 	t.Run("glob characters in the name", func(t *testing.T) {
 		t.Parallel()
@@ -702,6 +723,172 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 		require.Equal(t, setup.remoteCommit.String(), parentsOf(t, cfg, setup.localRepoPath, first.GetRebaseSha()),
 			"the rebase is onto the SHA, not onto the branch named like it")
 	})
+
+	// The names git resolves before refs/heads/<name>, each with a branch of that name as a decoy, and
+	// a non-branch reference that a branch of the exact name beats.
+	baseFile := gittest.TreeEntry{Path: "base", Mode: "100644", Content: "base\n"}
+	for _, tc := range []struct {
+		desc  string
+		start func(setup cherryPickOrRevertSetup) string
+		decoy func(setup cherryPickOrRevertSetup) git.ReferenceName
+	}{
+		{
+			desc:  "HEAD with a branch named HEAD",
+			start: func(cherryPickOrRevertSetup) string { return "HEAD" },
+			decoy: func(cherryPickOrRevertSetup) git.ReferenceName { return "refs/heads/HEAD" },
+		},
+		{
+			desc:  "heads/main with a branch named heads/main",
+			start: func(cherryPickOrRevertSetup) string { return "heads/" + git.DefaultBranch },
+			decoy: func(cherryPickOrRevertSetup) git.ReferenceName { return "refs/heads/heads/" + git.DefaultBranch },
+		},
+		{
+			desc:  "an upper-case SHA with a branch named like it",
+			start: func(setup cherryPickOrRevertSetup) string { return strings.ToUpper(setup.base.String()) },
+			decoy: func(setup cherryPickOrRevertSetup) git.ReferenceName {
+				return git.ReferenceName("refs/heads/" + strings.ToUpper(setup.base.String()))
+			},
+		},
+		{
+			desc:  "SHA~0 with a branch named like the SHA",
+			start: func(setup cherryPickOrRevertSetup) string { return setup.base.String() + "~0" },
+			decoy: func(setup cherryPickOrRevertSetup) git.ReferenceName {
+				return git.ReferenceName("refs/heads/" + setup.base.String())
+			},
+		},
+		{
+			desc:  "main~0 with a tag named main",
+			start: func(cherryPickOrRevertSetup) string { return git.DefaultBranch + "~0" },
+			decoy: func(cherryPickOrRevertSetup) git.ReferenceName {
+				return git.ReferenceName("refs/tags/" + git.DefaultBranch)
+			},
+		},
+		{
+			desc:  "main with refs/main",
+			start: func(cherryPickOrRevertSetup) string { return git.DefaultBranch },
+			decoy: func(cherryPickOrRevertSetup) git.ReferenceName { return git.ReferenceName("refs/" + git.DefaultBranch) },
+		},
+		{
+			// refs/heads/@ is not a valid reference name, so @ has no branch decoy.
+			desc:  "@, which is HEAD",
+			start: func(cherryPickOrRevertSetup) string { return "@" },
+			decoy: func(cherryPickOrRevertSetup) git.ReferenceName { return "" },
+		},
+	} {
+		t.Run("cherry-pick, "+tc.desc, func(t *testing.T) {
+			t.Parallel()
+
+			setup := setupCherryPickOrRevert(t, ctx, cfg)
+			if decoy := tc.decoy(setup); decoy != "" {
+				writeDecoy(t, cfg, setup.repoPath, decoy, baseFile)
+			}
+
+			resp, err := cherryPick(setup, tc.start(setup))
+			require.NoError(t, err)
+			require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
+		})
+	}
+
+	t.Run("cherry-pick, main:base, a blob, fails", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		_, err := cherryPick(setup, git.DefaultBranch+":base")
+		testhelper.RequireGrpcCode(t, err, codes.InvalidArgument)
+		require.ErrorContains(t, err, "resolve start ref")
+	})
+
+	t.Run("rebase onto heads/<branch> with a remote branch named heads/<branch>", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupRebasableRepositories(t, ctx, cfg, true)
+		writeDecoy(t, cfg, setup.remoteRepoPath, git.ReferenceName("refs/heads/heads/"+setup.remoteBranch))
+
+		stream, err := client.UserRebaseConfirmable(ctx)
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableHeaderRequest(setup.localRepo, gittest.TestUser, "1",
+			setup.localBranch, setup.localCommit, setup.remoteRepo, "heads/"+setup.remoteBranch)))
+		first, err := stream.Recv()
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableApplyRequest(true)))
+		_, err = stream.Recv()
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		require.Equal(t, io.EOF, err)
+
+		require.Equal(t, setup.remoteCommit.String(), parentsOf(t, cfg, setup.localRepoPath, first.GetRebaseSha()),
+			"heads/<branch> is the branch, as git resolves it, not the branch named heads/<branch>")
+	})
+}
+
+// TestResolveStartBranch checks the rule of resolveStartBranch over lookups of a fake repository:
+// git's resolution, but an existing branch of the exact name beats refs/x and refs/tags/x. resolve
+// answers the revision it is given, so the expected value is the revision git is asked for; a name
+// that git reads before any reference (an object ID, a root reference, a revision without a name)
+// is never looked up.
+func TestResolveStartBranch(t *testing.T) {
+	t.Parallel()
+
+	sha := strings.Repeat("ab", 20)
+	for _, tc := range []struct {
+		name     string
+		refs     []string
+		expected string
+		// noLookup tells that the name must not be looked up as a reference.
+		noLookup bool
+	}{
+		{name: "main", refs: []string{"refs/heads/main"}, expected: "refs/heads/main^{commit}"},
+		{name: "main", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "refs/heads/main^{commit}"},
+		{name: "main", refs: []string{"refs/main", "refs/heads/main"}, expected: "refs/heads/main^{commit}"},
+		{name: "main", refs: []string{"refs/tags/main"}, expected: "refs/tags/main^{commit}"},
+		{name: "main", refs: []string{"refs/main"}, expected: "refs/main^{commit}"},
+		{name: "main", refs: []string{"refs/heads/main", "refs/remotes/main"}, expected: "refs/heads/main^{commit}"},
+		{name: "heads/main", refs: []string{"refs/heads/main", "refs/heads/heads/main"}, expected: "refs/heads/main^{commit}"},
+		{name: "tags/v1", refs: []string{"refs/tags/v1"}, expected: "refs/tags/v1^{commit}"},
+		{name: "tags/v1", refs: []string{"refs/tags/v1", "refs/heads/tags/v1"}, expected: "refs/heads/tags/v1^{commit}"},
+		{name: "origin/x", refs: []string{"refs/remotes/origin/x"}, expected: "refs/remotes/origin/x^{commit}"},
+		{name: "origin", refs: []string{"refs/remotes/origin/HEAD"}, expected: "refs/remotes/origin/HEAD^{commit}"},
+		{name: "main~1", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "refs/heads/main~1^{commit}"},
+		{name: "main:file", refs: []string{"refs/heads/main"}, expected: "refs/heads/main:file^{commit}"},
+		{name: "refs/tags/v1^{}", refs: []string{"refs/tags/v1"}, expected: "refs/tags/v1^{}^{commit}"},
+		{name: "refs/heads/x", refs: []string{"refs/refs/heads/x"}, expected: "not found"},
+		{name: "abc1234", expected: "abc1234^{commit}"},
+		{name: "@", expected: "@^{commit}"},
+		{name: "HEAD", refs: []string{"refs/heads/HEAD"}, expected: "HEAD^{commit}", noLookup: true},
+		{name: "FETCH_HEAD~1", refs: []string{"refs/heads/FETCH_HEAD"}, expected: "FETCH_HEAD~1^{commit}", noLookup: true},
+		{name: sha, refs: []string{"refs/heads/" + sha}, expected: sha + "^{commit}", noLookup: true},
+		{name: strings.ToUpper(sha), refs: []string{"refs/heads/" + strings.ToUpper(sha)}, expected: strings.ToUpper(sha) + "^{commit}", noLookup: true},
+		{name: sha + "~0", refs: []string{"refs/heads/" + sha}, expected: sha + "~0^{commit}", noLookup: true},
+		{name: "@{-1}", expected: "@{-1}^{commit}", noLookup: true},
+		{name: ":path", expected: ":path^{commit}", noLookup: true},
+		{name: "~1", expected: "~1^{commit}", noLookup: true},
+	} {
+		t.Run(tc.name+" with "+strings.Join(tc.refs, ","), func(t *testing.T) {
+			refs := map[git.ReferenceName]bool{}
+			for _, ref := range tc.refs {
+				refs[git.ReferenceName(ref)] = true
+			}
+			var lookups []git.ReferenceName
+			exists := func(name git.ReferenceName) (bool, error) {
+				lookups = append(lookups, name)
+				return refs[name], nil
+			}
+			resolve := func(revision git.Revision) (git.ObjectID, error) {
+				return git.ObjectID(revision), nil
+			}
+
+			resolved, err := resolveStartBranch(tc.name, git.ObjectHashSHA1, exists, resolve)
+			if tc.expected == "not found" {
+				require.ErrorIs(t, err, git.ErrReferenceNotFound)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.expected, resolved.String())
+			}
+			if tc.noLookup {
+				require.Empty(t, lookups, "the name is not looked up as a reference")
+			}
+		})
+	}
 }
 
 // TestSplitRevisionSuffix checks the split of a start revision into its name and its suffix.

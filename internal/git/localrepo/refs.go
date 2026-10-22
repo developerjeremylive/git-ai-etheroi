@@ -171,7 +171,8 @@ func (repo *Repo) ResolveBranchesExactly(ctx context.Context, reader catfile.Obj
 // ResolveBranchesExactly is the peeled form, for the callers that want the commit.
 //
 // show-ref --verify reads the one reference, where for-each-ref <reference> lists every loose
-// reference of its directory (50,000 loose branches: 250 ms against 3 ms).
+// reference of its directory (50,000 loose branches: 250 ms against 3 ms). A reference whose
+// object is missing yields its value too, as rev-parse does: it can still be deleted.
 func (repo *Repo) ResolveReferenceExactly(ctx context.Context, reference git.ReferenceName) (git.ObjectID, error) {
 	var stdout, stderr bytes.Buffer
 	if err := repo.ExecAndWait(ctx, gitcmd.Command{
@@ -180,9 +181,15 @@ func (repo *Repo) ResolveReferenceExactly(ctx context.Context, reference git.Ref
 		Args:  []string{reference.String()},
 	}, gitcmd.WithStdout(&stdout), gitcmd.WithStderr(&stderr)); err != nil {
 		// show-ref --verify exits 128 with "not a valid ref" for a reference that does not
-		// exist or whose name is not valid; anything else is a failure.
-		if code, ok := command.ExitStatus(err); ok && code == 128 && strings.Contains(stderr.String(), "not a valid ref") {
-			return "", git.ErrReferenceNotFound
+		// exist or whose name is not valid, and with "bad ref <reference> (<object ID>)" for one
+		// whose object is missing; anything else is a failure.
+		if code, ok := command.ExitStatus(err); ok && code == 128 {
+			if strings.Contains(stderr.String(), "not a valid ref") {
+				return "", git.ErrReferenceNotFound
+			}
+			if value, ok := badReferenceValue(stderr.String(), reference); ok {
+				return value, nil
+			}
 		}
 		return "", fmt.Errorf("show-ref %q: %w, stderr: %q", reference, err, stderr.String())
 	}
@@ -194,6 +201,40 @@ func (repo *Repo) ResolveReferenceExactly(ctx context.Context, reference git.Ref
 	}
 
 	return git.ObjectID(value), nil
+}
+
+// badReferenceValue returns the value that show-ref --verify reports for reference in stderr when
+// the object of the reference is missing: "fatal: git show-ref: bad ref <reference> (<object ID>)".
+func badReferenceValue(stderr string, reference git.ReferenceName) (git.ObjectID, bool) {
+	_, rest, ok := strings.Cut(stderr, "bad ref "+reference.String()+" (")
+	if !ok {
+		return "", false
+	}
+	value, _, ok := strings.Cut(rest, ")")
+	if !ok || value == "" {
+		return "", false
+	}
+	return git.ObjectID(value), true
+}
+
+// ReferenceExists reports whether reference exists under its exact name, with `git show-ref
+// --exists`: no DWIM rule, whatever its value points to (an object that is missing included). A
+// name that is not a valid reference name does not exist.
+func (repo *Repo) ReferenceExists(ctx context.Context, reference git.ReferenceName) (bool, error) {
+	var stderr bytes.Buffer
+	err := repo.ExecAndWait(ctx, gitcmd.Command{
+		Name:  "show-ref",
+		Flags: []gitcmd.Option{gitcmd.Flag{Name: "--exists"}},
+		Args:  []string{reference.String()},
+	}, gitcmd.WithStderr(&stderr))
+	if err == nil {
+		return true, nil
+	}
+	// show-ref --exists exits 2 for a reference that does not exist.
+	if code, ok := command.ExitStatus(err); ok && code == 2 {
+		return false, nil
+	}
+	return false, fmt.Errorf("show-ref --exists %q: %w, stderr: %q", reference, err, stderr.String())
 }
 
 // GetReference looks up and returns the given reference. Returns a
@@ -433,13 +474,13 @@ func (repo *Repo) GetDefaultBranch(ctx context.Context) (git.ReferenceName, erro
 	for _, headCandidate := range []git.ReferenceName{
 		headReference, git.DefaultRef, git.LegacyDefaultRef,
 	} {
-		if _, err := repo.ResolveReferenceExactly(ctx, headCandidate); err != nil {
-			if errors.Is(err, git.ErrReferenceNotFound) {
-				continue
-			}
+		exists, err := repo.ReferenceExists(ctx, headCandidate)
+		if err != nil {
 			return "", err
 		}
-		return headCandidate, nil
+		if exists {
+			return headCandidate, nil
+		}
 	}
 
 	// If all else fails, return the first branch name

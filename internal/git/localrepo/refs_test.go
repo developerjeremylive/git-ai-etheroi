@@ -204,6 +204,10 @@ func TestRepo_ResolveReferenceExactly(t *testing.T) {
 	// git writes only commits to branches; another reference may hold the tag itself.
 	gittest.WriteRef(t, cfg, repoPath, "refs/keep/at-tag", tag)
 	gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "refs/heads/symbolic", "refs/heads/main")
+	// A branch whose object is missing still has its value.
+	broken := gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("broken"))
+	gittest.WriteRef(t, cfg, repoPath, "refs/heads/broken", broken)
+	require.NoError(t, os.Remove(filepath.Join(repoPath, "objects", broken.String()[:2], broken.String()[2:])))
 
 	for _, tc := range []struct {
 		reference   git.ReferenceName
@@ -216,6 +220,7 @@ func TestRepo_ResolveReferenceExactly(t *testing.T) {
 		{reference: "refs/heads/x*", expectedErr: git.ErrReferenceNotFound},
 		{reference: "refs/heads/main~1", expectedErr: git.ErrReferenceNotFound},
 		{reference: "refs/keep/at-tag", expected: tag},
+		{reference: "refs/heads/broken", expected: broken},
 		{reference: "refs/heads/symbolic", expected: commit},
 	} {
 		t.Run(tc.reference.String(), func(t *testing.T) {
@@ -250,6 +255,48 @@ func TestRepo_GetDefaultBranchReadsCandidatesExactly(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, git.LegacyDefaultRef, defaultBranch)
 		})
+	}
+
+	t.Run("HEAD's branch at a missing object", func(t *testing.T) {
+		t.Parallel()
+
+		// The branch exists, so it is the default branch, whatever it points to.
+		cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+		gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main")
+		broken := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("main"))
+		require.NoError(t, os.Remove(filepath.Join(repoPath, "objects", broken.String()[:2], broken.String()[2:])))
+
+		defaultBranch, err := repo.GetDefaultBranch(ctx)
+		require.NoError(t, err)
+		require.Equal(t, git.DefaultRef, defaultBranch)
+	})
+}
+
+// TestRepo_ReferenceExists checks that a reference exists only under its exact name, whatever it
+// points to, and that a name that is not a reference name does not exist.
+func TestRepo_ReferenceExists(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+
+	commit := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("main"))
+	gittest.WriteRef(t, cfg, repoPath, "refs/tags/refs/heads/x", commit)
+	gittest.WriteRef(t, cfg, repoPath, "refs/heads/x/y", commit)
+	broken := gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("broken"))
+	gittest.WriteRef(t, cfg, repoPath, "refs/heads/broken", broken)
+	require.NoError(t, os.Remove(filepath.Join(repoPath, "objects", broken.String()[:2], broken.String()[2:])))
+
+	for reference, expected := range map[git.ReferenceName]bool{
+		"refs/heads/main":   true,
+		"refs/heads/broken": true,
+		"refs/heads/x":      false,
+		"refs/heads/x*":     false,
+		"refs/heads/main~1": false,
+	} {
+		exists, err := repo.ReferenceExists(ctx, reference)
+		require.NoError(t, err, reference)
+		require.Equal(t, expected, exists, reference)
 	}
 }
 
