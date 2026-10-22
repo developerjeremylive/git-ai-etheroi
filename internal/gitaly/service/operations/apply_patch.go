@@ -82,6 +82,10 @@ func (s *Server) userApplyPatch(ctx context.Context, header *gitalypb.UserApplyP
 		if err != nil {
 			return fmt.Errorf("default branch name: %w", err)
 		}
+		// A repository without a branch has no default branch.
+		if defaultBranch == "" {
+			return errNoDefaultBranch
+		}
 
 		parentCommitID, err = s.resolveBranchCommitExactly(ctx, repo, defaultBranch)
 		if errors.Is(err, git.ErrReferenceNotFound) {

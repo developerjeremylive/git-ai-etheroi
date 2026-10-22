@@ -212,6 +212,9 @@ func TestRepo_ResolveReferenceExactly(t *testing.T) {
 	}{
 		{reference: "refs/heads/main", expected: commit},
 		{reference: "refs/heads/x", expectedErr: git.ErrReferenceNotFound},
+		// Not reference names: never a pattern, never a revision.
+		{reference: "refs/heads/x*", expectedErr: git.ErrReferenceNotFound},
+		{reference: "refs/heads/main~1", expectedErr: git.ErrReferenceNotFound},
 		{reference: "refs/keep/at-tag", expected: tag},
 		{reference: "refs/heads/symbolic", expected: commit},
 	} {
@@ -219,6 +222,33 @@ func TestRepo_ResolveReferenceExactly(t *testing.T) {
 			oid, err := repo.ResolveReferenceExactly(ctx, tc.reference)
 			require.Equal(t, tc.expectedErr, err)
 			require.Equal(t, tc.expected, oid)
+		})
+	}
+}
+
+// TestRepo_GetDefaultBranchReadsCandidatesExactly checks that the candidates of the default branch
+// (HEAD's branch, main, master) are read by their exact names: a missing refs/heads/main is not the
+// default branch because git's DWIM rules would resolve it through a decoy, and the default branch
+// is then master.
+func TestRepo_GetDefaultBranchReadsCandidatesExactly(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+
+	for _, decoy := range []git.ReferenceName{
+		"refs/refs/heads/main", "refs/tags/refs/heads/main", "refs/heads/refs/heads/main", "refs/remotes/refs/heads/main",
+	} {
+		t.Run(decoy.String(), func(t *testing.T) {
+			t.Parallel()
+
+			cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+			gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main")
+			gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("master"))
+			gittest.WriteRef(t, cfg, repoPath, decoy, gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("decoy")))
+
+			defaultBranch, err := repo.GetDefaultBranch(ctx)
+			require.NoError(t, err)
+			require.Equal(t, git.LegacyDefaultRef, defaultBranch)
 		})
 	}
 }

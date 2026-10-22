@@ -115,6 +115,44 @@ func TestUserFFBranchResolvesBranchesExactly(t *testing.T) {
 			requireDecoyUntouched(t, cfg, repoPath, decoy, decoyCommit)
 		})
 	}
+
+	t.Run("a symbolic branch", func(t *testing.T) {
+		t.Parallel()
+
+		// A symbolic branch reads as the commit of its target, and the update moves the target.
+		repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
+		base := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch(git.DefaultBranch))
+		gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "refs/heads/sym", git.DefaultRef.String())
+		commit := gittest.WriteCommit(t, cfg, repoPath, gittest.WithParents(base))
+
+		_, err := client.UserFFBranch(ctx, &gitalypb.UserFFBranchRequest{
+			Repository: repo,
+			User:       gittest.TestUser,
+			CommitId:   commit.String(),
+			Branch:     []byte("sym"),
+		})
+		require.NoError(t, err)
+		require.Equal(t, commit.String(), exactReferenceValue(t, cfg, repoPath, git.DefaultRef))
+	})
+
+	t.Run("glob characters in the name", func(t *testing.T) {
+		t.Parallel()
+
+		// x* is not a branch name, and never a pattern that matches xa.
+		repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
+		xa := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("xa"))
+		commit := gittest.WriteCommit(t, cfg, repoPath, gittest.WithParents(xa))
+
+		_, err := client.UserFFBranch(ctx, &gitalypb.UserFFBranchRequest{
+			Repository: repo,
+			User:       gittest.TestUser,
+			CommitId:   commit.String(),
+			Branch:     []byte("x*"),
+		})
+		testhelper.RequireGrpcCode(t, err, codes.InvalidArgument)
+		require.ErrorContains(t, err, "reference not found")
+		require.Equal(t, xa.String(), exactReferenceValue(t, cfg, repoPath, "refs/heads/xa"))
+	})
 }
 
 // TestUserMergeBranchResolvesBranchesExactly checks that UserMergeBranch into a missing branch is
@@ -175,6 +213,23 @@ func TestUserDeleteBranchResolvesBranchesExactly(t *testing.T) {
 			requireDecoyUntouched(t, cfg, repoPath, decoy, decoyCommit)
 		})
 	}
+
+	t.Run("glob characters in the name", func(t *testing.T) {
+		t.Parallel()
+
+		// x* is not a branch name, and never a pattern that matches xa.
+		repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
+		xa := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("xa"))
+
+		_, err := client.UserDeleteBranch(ctx, &gitalypb.UserDeleteBranchRequest{
+			Repository: repo,
+			User:       gittest.TestUser,
+			BranchName: []byte("x*"),
+		})
+		testhelper.RequireGrpcCode(t, err, codes.FailedPrecondition)
+		require.ErrorContains(t, err, "branch not found")
+		require.Equal(t, xa.String(), exactReferenceValue(t, cfg, repoPath, "refs/heads/xa"))
+	})
 }
 
 // cherryPickOrRevertSetup is a repository whose branch main is at base, with commit, a commit on
@@ -312,6 +367,28 @@ func TestUserUpdateSubmoduleResolvesBranchesExactly(t *testing.T) {
 			require.ErrorContains(t, err, "Cannot find branch")
 			requireDecoyUntouched(t, cfg, repoPath, decoy, decoyCommit)
 		})
+
+		t.Run("missing branch with an expected old object ID, "+decoy.String(), func(t *testing.T) {
+			t.Parallel()
+
+			// The expected old object ID passes its own check; the branch, read for the tree and the
+			// parent, is still missing, whatever decoy git's DWIM rules would take for it.
+			repo, repoPath, branchCommit, newSubCommit, submodule := setup(t)
+			decoyCommit := writeDecoy(t, cfg, repoPath, decoy, submodule)
+
+			_, err := client.UserUpdateSubmodule(ctx, &gitalypb.UserUpdateSubmoduleRequest{
+				Repository:     repo,
+				User:           gittest.TestUser,
+				CommitSha:      newSubCommit.String(),
+				Branch:         []byte("x"),
+				Submodule:      []byte("sub"),
+				CommitMessage:  []byte("update sub on x"),
+				ExpectedOldOid: branchCommit.String(),
+			})
+			testhelper.RequireGrpcCode(t, err, codes.InvalidArgument)
+			require.ErrorContains(t, err, legacyErrPrefixInvalidSubmodulePath)
+			requireDecoyUntouched(t, cfg, repoPath, decoy, decoyCommit)
+		})
 	}
 
 	t.Run("branch with a tag of its name", func(t *testing.T) {
@@ -407,19 +484,40 @@ func TestUserApplyPatchResolvesBranchesExactly(t *testing.T) {
 			require.Equal(t, decoyCommit.String(), exactReferenceValue(t, cfg, repoPath, decoy), "the decoy is untouched")
 		})
 
-		t.Run("missing default branch, "+strings.Replace(decoy.String(), "/x", "/"+git.DefaultBranch, 1), func(t *testing.T) {
+		decoyRef := git.ReferenceName(strings.Replace(decoy.String(), "/x", "/"+git.DefaultBranch, 1))
+		t.Run("missing default branch, "+decoyRef.String(), func(t *testing.T) {
 			t.Parallel()
 
 			repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
-			// The repository has no branch, so its default branch is HEAD's, refs/heads/main, which
-			// does not exist; the decoy is named for it.
-			decoyRef := git.ReferenceName(strings.Replace(decoy.String(), "/x", "/"+git.DefaultBranch, 1))
+			// HEAD is refs/heads/main, which does not exist; the decoy is named for it.
 			decoyCommit := writeDecoy(t, cfg, repoPath, decoyRef, file)
 
-			_, err := applyExactBranchPatch(t, ctx, client, repo, "x", decoyCommit)
+			resp, err := applyExactBranchPatch(t, ctx, client, repo, "x", decoyCommit)
+			if strings.HasPrefix(decoyRef.String(), "refs/heads/") {
+				// refs/heads/refs/heads/main is a branch, the repository's only one: the default
+				// branch falls back to it, as to the first branch of any repository.
+				require.NoError(t, err)
+				require.Equal(t, decoyCommit.String(), parentsOf(t, cfg, repoPath, resp.GetBranchUpdate().GetCommitId()))
+				return
+			}
 			require.ErrorContains(t, err, errNoDefaultBranch.Error())
 			require.Equal(t, decoyCommit.String(), exactReferenceValue(t, cfg, repoPath, decoyRef), "the decoy is untouched")
 			require.Empty(t, exactReferenceValue(t, cfg, repoPath, "refs/heads/x"), "no branch x")
+		})
+
+		t.Run("default branch falls back to master, "+decoyRef.String(), func(t *testing.T) {
+			t.Parallel()
+
+			repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
+			// HEAD is refs/heads/main, which does not exist, and master is the branch of the
+			// repository: the default branch is master, whatever decoy is named for main.
+			master := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("master"), gittest.WithTreeEntries(file))
+			writeDecoy(t, cfg, repoPath, decoyRef, file)
+
+			resp, err := applyExactBranchPatch(t, ctx, client, repo, "x", master)
+			require.NoError(t, err)
+			require.True(t, resp.GetBranchUpdate().GetBranchCreated())
+			require.Equal(t, master.String(), parentsOf(t, cfg, repoPath, resp.GetBranchUpdate().GetCommitId()), "x starts from master")
 		})
 	}
 }

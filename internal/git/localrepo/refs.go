@@ -120,15 +120,16 @@ func (repo *Repo) ResolveRevisionWithReader(ctx context.Context, reader catfile.
 // git resolves a name with its DWIM rules, so a missing refs/heads/x resolves through
 // refs/refs/heads/x, refs/tags/refs/heads/x or refs/remotes/refs/heads/x when one of them exists.
 // The exact name is the first name git tries, so a branch that reader cannot resolve does not
-// exist exactly either, and costs nothing more. The branches reader resolves are read by their
-// exact names with one for-each-ref, whose values reader then peels.
+// exist exactly either, and costs nothing more. Each branch reader resolves is read by its exact
+// name (ResolveReferenceExactly), and reader then peels its value.
 func (repo *Repo) ResolveBranchesExactly(ctx context.Context, reader catfile.ObjectInfoReader, branches ...git.ReferenceName) (map[git.ReferenceName]git.ObjectID, error) {
-	wanted := make(map[git.ReferenceName]bool, len(branches))
-	var patterns []string
+	resolved := make(map[git.ReferenceName]git.ObjectID, len(branches))
+	seen := make(map[git.ReferenceName]bool, len(branches))
 	for _, branch := range branches {
-		if wanted[branch] {
+		if seen[branch] {
 			continue
 		}
+		seen[branch] = true
 
 		if _, err := repo.ResolveRevisionWithReader(ctx, reader, branch.Revision()+"^{commit}"); err != nil {
 			if errors.Is(err, git.ErrReferenceNotFound) {
@@ -136,61 +137,63 @@ func (repo *Repo) ResolveBranchesExactly(ctx context.Context, reader catfile.Obj
 			}
 			return nil, fmt.Errorf("resolving %q: %w", branch, err)
 		}
-		wanted[branch] = true
-		patterns = append(patterns, branch.String())
-	}
 
-	resolved := make(map[git.ReferenceName]git.ObjectID, len(patterns))
-	if len(patterns) == 0 {
-		return resolved, nil
-	}
-
-	refs, err := gitcmd.GetReferences(ctx, repo, gitcmd.GetReferencesConfig{Patterns: patterns})
-	if err != nil {
-		return nil, fmt.Errorf("reading branches: %w", err)
-	}
-	for _, ref := range refs {
-		// A pattern also matches the references below it, so only exact names count.
-		if !wanted[ref.Name] {
-			continue
-		}
-
-		// The value of the reference itself, as for-each-ref read it, peeled to a commit as
-		// `<branch>^{commit}` is.
-		commit, err := repo.ResolveRevisionWithReader(ctx, reader, git.Revision(ref.Target)+"^{commit}")
+		value, err := repo.ResolveReferenceExactly(ctx, branch)
 		if err != nil {
 			if errors.Is(err, git.ErrReferenceNotFound) {
 				continue
 			}
-			return nil, fmt.Errorf("peeling %q: %w", ref.Name, err)
+			return nil, err
 		}
-		resolved[ref.Name] = commit
+
+		// The value of the reference itself, peeled to a commit as `<branch>^{commit}` is.
+		commit, err := repo.ResolveRevisionWithReader(ctx, reader, value.Revision()+"^{commit}")
+		if err != nil {
+			if errors.Is(err, git.ErrReferenceNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("peeling %q: %w", branch, err)
+		}
+		resolved[branch] = commit
 	}
 
 	return resolved, nil
 }
 
 // ResolveReferenceExactly returns the object ID that reference points to, read by its exact name
-// with one for-each-ref, or git.ErrReferenceNotFound when it does not exist (also when references
-// below its name do, refs/heads/<x>/y). Unlike ResolveRevision, whose revision git resolves with
-// its DWIM rules, a missing refs/heads/<x> never resolves through refs/tags/refs/heads/<x> or
-// another reference. The value is not peeled: it is the value that a compare-and-swap of the
-// reference expects, as `git rev-parse <reference>` returns it when the reference exists. A
-// symbolic reference yields the object its target points to. ResolveBranchesExactly is the peeled
-// form, for the callers that want the commit.
+// with `git show-ref --verify`, or git.ErrReferenceNotFound when it does not exist (also when
+// references below its name do, refs/heads/<x>/y, and when the name is not a valid reference name,
+// such as one with glob characters or a revision like main~1). Unlike ResolveRevision, whose
+// revision git resolves with its DWIM rules, a missing refs/heads/<x> never resolves through
+// refs/tags/refs/heads/<x> or another reference. The value is not peeled: it is the value that a
+// compare-and-swap of the reference expects, as `git rev-parse <reference>` returns it when the
+// reference exists. A symbolic reference yields the object its target points to.
+// ResolveBranchesExactly is the peeled form, for the callers that want the commit.
+//
+// show-ref --verify reads the one reference, where for-each-ref <reference> lists every loose
+// reference of its directory (50,000 loose branches: 250 ms against 3 ms).
 func (repo *Repo) ResolveReferenceExactly(ctx context.Context, reference git.ReferenceName) (git.ObjectID, error) {
-	// A pattern also matches the references below it, so only the exact name counts.
-	refs, err := repo.GetReferences(ctx, reference.String())
-	if err != nil {
-		return "", fmt.Errorf("reading %q: %w", reference, err)
-	}
-	for _, ref := range refs {
-		if ref.Name == reference && ref.Target != "" {
-			return git.ObjectID(ref.Target), nil
+	var stdout, stderr bytes.Buffer
+	if err := repo.ExecAndWait(ctx, gitcmd.Command{
+		Name:  "show-ref",
+		Flags: []gitcmd.Option{gitcmd.Flag{Name: "--verify"}},
+		Args:  []string{reference.String()},
+	}, gitcmd.WithStdout(&stdout), gitcmd.WithStderr(&stderr)); err != nil {
+		// show-ref --verify exits 128 with "not a valid ref" for a reference that does not
+		// exist or whose name is not valid; anything else is a failure.
+		if code, ok := command.ExitStatus(err); ok && code == 128 && strings.Contains(stderr.String(), "not a valid ref") {
+			return "", git.ErrReferenceNotFound
 		}
+		return "", fmt.Errorf("show-ref %q: %w, stderr: %q", reference, err, stderr.String())
 	}
 
-	return "", git.ErrReferenceNotFound
+	// The line is "<object ID> <reference>".
+	value, name, ok := strings.Cut(strings.TrimSuffix(stdout.String(), "\n"), " ")
+	if !ok || name != reference.String() {
+		return "", fmt.Errorf("show-ref %q: unexpected output %q", reference, stdout.String())
+	}
+
+	return git.ObjectID(value), nil
 }
 
 // GetReference looks up and returns the given reference. Returns a
@@ -422,17 +425,21 @@ func (repo *Repo) GetDefaultBranch(ctx context.Context) (git.ReferenceName, erro
 	}
 
 	// Ideally we would only use HEAD to determine the default branch, but
-	// gitlab-rails depends on the branch being determined like this.
+	// gitlab-rails depends on the branch being determined like this. Each
+	// candidate is read by its exact name: with its DWIM rules, git would take a
+	// missing refs/heads/main for one of refs/refs/heads/main,
+	// refs/tags/refs/heads/main, refs/heads/refs/heads/main or
+	// refs/remotes/refs/heads/main.
 	for _, headCandidate := range []git.ReferenceName{
 		headReference, git.DefaultRef, git.LegacyDefaultRef,
 	} {
-		has, err := repo.HasRevision(ctx, headCandidate.Revision())
-		if err != nil {
+		if _, err := repo.ResolveReferenceExactly(ctx, headCandidate); err != nil {
+			if errors.Is(err, git.ErrReferenceNotFound) {
+				continue
+			}
 			return "", err
 		}
-		if has {
-			return headCandidate, nil
-		}
+		return headCandidate, nil
 	}
 
 	// If all else fails, return the first branch name
