@@ -158,12 +158,70 @@ func testUserLandPolicyReloadedInFlight(t *testing.T, ctx context.Context) {
 
 		require.True(t, reloader.fired.Load(), "the policy was reloaded in flight")
 		testhelper.RequireGrpcCode(t, errs[0], codes.PermissionDenied)
-		// Denied alone, by its access check: the detail is the access check's, whose user ID is the
-		// request's (pre-receive), not the agent's name as an admission in a batch reports it.
-		require.NotNil(t, landErrorDetail(t, errs[0]).GetAccessCheck())
+		require.Equal(t, "bot", landErrorDetail(t, errs[0]).GetAccessCheck().GetUserId())
 		require.NoError(t, errs[1])
 		require.NoError(t, errs[2])
 		require.ElementsMatch(t, []string{"base", "a", "c"}, mainFiles(t, cfg, repoPath))
+	})
+}
+
+// TestUserLand_accessCheckNamesTheAgent: the denial of an agent's land names the agent as the user
+// of its access check whichever check denied it: the admission of a batch, the pre-receive access
+// check of a land that does not batch, or the pre-receive of a member that lands alone after its
+// batch was refused because the policy changed.
+func TestUserLand_accessCheckNamesTheAgent(t *testing.T) {
+	t.Parallel()
+
+	runLandBatchTest(t, testUserLandAccessCheckNamesTheAgent)
+}
+
+func testUserLandAccessCheckNamesTheAgent(t *testing.T, ctx context.Context) {
+	t.Parallel()
+
+	requireDeniedAs := func(t *testing.T, err error, agent string) {
+		t.Helper()
+		testhelper.RequireGrpcCode(t, err, codes.PermissionDenied)
+		require.Equal(t, agent, landErrorDetail(t, err).GetAccessCheck().GetUserId())
+	}
+
+	t.Run("the admission of a batch", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cfg, client := setupAgentLandService(t, ctx, agentBatchingGraft(2, denyMainFor("bot")))
+		repo, _, _, change := policyReloadRepo(t, ctx, cfg)
+
+		_, errs := landInOrder(t, ctx, client, repo,
+			agentLanding{agent: "bot", commit: change("b")},
+			agentLanding{agent: "alice", commit: change("a")},
+		)
+		requireDeniedAs(t, errs[0], "bot")
+		require.NoError(t, errs[1])
+	})
+
+	t.Run("the access check of a land that does not batch", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cfg, client := setupAgentLandService(t, ctx, unbatchedGraft(denyMainFor("bot")))
+		repo, _, _, change := policyReloadRepo(t, ctx, cfg)
+
+		_, errs := landInOrder(t, ctx, client, repo, agentLanding{agent: "bot", commit: change("b")})
+		requireDeniedAs(t, errs[0], "bot")
+	})
+
+	t.Run("the access check of a member that lands alone", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cfg, client, reloader := setupPolicyReload(t, ctx, agentBatchingGraft(2, nil))
+		repo, _, _, change := policyReloadRepo(t, ctx, cfg)
+
+		reloader.arm(denyMainFor("bot"))
+		_, errs := landInOrder(t, ctx, client, repo,
+			agentLanding{agent: "bot", commit: change("b")},
+			agentLanding{agent: "alice", commit: change("a")},
+		)
+		require.True(t, reloader.fired.Load(), "the policy was reloaded in flight")
+		requireDeniedAs(t, errs[0], "bot")
+		require.NoError(t, errs[1])
 	})
 }
 
