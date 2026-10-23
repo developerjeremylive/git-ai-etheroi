@@ -83,11 +83,15 @@ func TestUserLand_theRulesAreResolvedInTheLane(t *testing.T) {
 func TestUserLand_aRuleThatDoesNotEndInTimeIsHandedBack(t *testing.T) {
 	t.Parallel()
 
+	var s *Server
+	operationServerHooks.Store(t.Name(), func(served *Server) { s = served })
 	q := newQueueFixtureMode(t, 3, "slow", func(c *config.GraftResolver) { c.InlineTimeout = "300ms" })
+	require.NotNil(t, s)
+	calls := countInlineCalls(s)
 	for i, err := range q.landAll(q.onA) {
 		require.NoError(t, err, "land %d", i+1)
 	}
-	require.Positive(t, inlineCalls(t, q.dir), "the lane tried")
+	require.Positive(t, calls.Load(), "the lane tried")
 	require.Len(t, strings.Split(q.branchBlob(t, "a"), "\n"), 4)
 	require.Empty(t, landTickets.keysOf(q.scope), "no ticket is kept")
 }

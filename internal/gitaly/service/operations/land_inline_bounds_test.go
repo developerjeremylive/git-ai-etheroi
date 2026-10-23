@@ -52,6 +52,18 @@ func (p inlineProbe) resolve(ctx context.Context, t *testing.T, pre *landPreReso
 	return p.s.landResolveInline(ctx, p.fx.request("Land"), p.fx.tip, p.fx.commit, p.l, pre)
 }
 
+// countInlineCalls counts the inline calls of the lane (land_inline.go) where it makes them. A test that cuts a
+// call with a real timeout must not count them in the log of the resolver: the log is written once the
+// resolver's process has started, which a loaded machine does after the timeout has cut the call.
+func countInlineCalls(s *Server) *atomic.Int32 {
+	var calls atomic.Int32
+	s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
+		calls.Add(1)
+		return context.WithTimeout(ctx, allowed)
+	}
+	return &calls
+}
+
 // TestLandResolveInline_aReplyThatIsNotTheRulesIsRejected: a resolver that echoes rules_only but answers with
 // a model's file, a file that says nothing of its origin, or a file it holds, is not taken: the member goes out
 // of the lane as one the rules cannot resolve, and nothing of the reply is kept. The guard is the lane's own;
@@ -120,19 +132,19 @@ func TestLandResolveInline_aBatchLosesAtMostItsBudget(t *testing.T) {
 	budget := &landInlineBudget{}
 	ctx := withLandInlineBudget(p.fx.ctx, budget)
 
-	start := time.Now()
+	calls := countInlineCalls(p.s)
+
 	for i := 0; i < members; i++ {
 		require.Equal(t, landInlineSlow, p.resolve(ctx, t, newLandPreResolution()), "member %d", i+1)
 	}
-	stalled := time.Since(start)
 
-	require.Equal(t, 1, inlineCalls(t, p.dir), "only the first member called: the others found the budget spent")
+	// One call, so the lane stalled once for it, not once per member (six at 300 ms would be 1.8 s).
+	require.EqualValues(t, 1, calls.Load(), "only the first member called: the others found the budget spent")
 	require.GreaterOrEqual(t, budget.lost, 250*time.Millisecond)
-	require.Less(t, stalled, 1500*time.Millisecond, "the lane stalled once for the call, not once per member")
 
 	// The next batch attempt has a budget of its own.
 	require.Equal(t, landInlineSlow, p.resolve(withLandInlineBudget(p.fx.ctx, &landInlineBudget{}), t, newLandPreResolution()))
-	require.Equal(t, 2, inlineCalls(t, p.dir))
+	require.EqualValues(t, 2, calls.Load())
 }
 
 // TestLandResolveInline_aBatchOfFastRulesIsNotCutShort: members that the rules resolve in milliseconds, against a
@@ -315,13 +327,49 @@ func TestUserLand_oneFailedInlineCallDoesNotStartAConvoy(t *testing.T) {
 	t.Parallel()
 
 	const lands = 8
-	q := newQueueFixtureMode(t, 2*lands, "slowonce", func(c *config.GraftResolver) { c.InlineTimeout = "300ms" })
+	var s *Server
+	operationServerHooks.Store(t.Name(), func(served *Server) { s = served })
+	// No clock cuts a call: the timeout is far longer than any call. The hiccup is cut by the test, the moment
+	// the resolver has started it (it has made its "slowed" marker): the calls in flight then are cancelled, and
+	// the hiccup is one of them, whichever call it is. (With a real 300 ms a loaded machine cut the calls that
+	// never hiccuped, which need that long to start a python process, and the lane handed those members back.)
+	q := newQueueFixtureMode(t, 2*lands, "slowonce", func(c *config.GraftResolver) { c.InlineTimeout = "30s" })
+	require.NotNil(t, s)
+	var mu sync.Mutex
+	var inflight []context.CancelFunc
+	s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
+		callCtx, cancel := context.WithTimeout(ctx, allowed)
+		mu.Lock()
+		defer mu.Unlock()
+		inflight = append(inflight, cancel)
+		return callCtx, cancel
+	}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for {
+			if _, err := os.Stat(filepath.Join(q.dir, "slowed")); err == nil {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, cancel := range inflight {
+					cancel()
+				}
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
 
 	for i, err := range q.landAll(q.onA[:lands]) {
 		require.NoError(t, err, "land %d of the first wave", i+1)
 	}
 	require.Empty(t, landTickets.keysOf(q.scope), "no ticket is kept after the hiccup")
 	outOfLane := unionCalls(t, q.dir) - inlineCalls(t, q.dir)
+	require.Positive(t, outOfLane, "the hiccup was handed back")
 	inline := inlineCalls(t, q.dir)
 
 	for i, err := range q.landAll(q.onA[lands:]) {
@@ -374,6 +422,7 @@ func TestUserLand_aLaneRoundThatHandsBackTakesNoTicket(t *testing.T) {
 		defer mu.Unlock()
 		held = append(held, landTickets.keysOf(q.scope))
 	}
+	calls := countInlineCalls(s)
 	_, err := q.land(q.onA[0])
 	require.NoError(t, err)
 
@@ -383,7 +432,7 @@ func TestUserLand_aLaneRoundThatHandsBackTakesNoTicket(t *testing.T) {
 	for round, keys := range held {
 		require.Empty(t, keys, "ticket held at the lane round %d", round+1)
 	}
-	require.Positive(t, inlineCalls(t, q.dir))
+	require.Positive(t, calls.Load(), "the lane tried")
 }
 
 // TestUserLand_withNoInlineSlotAllTheLandsStillLand: every slot of the lane is taken (by calls in flight for other
@@ -472,31 +521,40 @@ func TestUserLand_aModelLandReleasesTheTicketItQueuedFor(t *testing.T) {
 	}
 }
 
-// TestLandResolveInline_aSlowRuleThatSucceedsIsChargedToTheBudget: the rule takes 0.4 s and ends, and the lane gives it
-// 1 s: six members of one batch attempt do not stall the lane for 6 x 0.4 s. All the time of the calls is the
-// batch's, and once it is spent the rest go out of the lane without a call.
+// TestLandResolveInline_aSlowRuleThatSucceedsIsChargedToTheBudget: a rule that is slow but ends in time is taken, and
+// all the time of its call is the batch's: what the next member is given is what is left of the budget, and once it
+// is spent the rest of the members go out of the lane without a call, so six members do not stall the lane six
+// times. The slowness is the budget's own bookkeeping (landInlineBudget.lost, which the test sets as a slow call
+// would have), not a rule that sleeps against a real clock, which a loaded machine does not keep.
 func TestLandResolveInline_aSlowRuleThatSucceedsIsChargedToTheBudget(t *testing.T) {
 	t.Parallel()
 
 	const members = 6
-	p := newInlineProbe(t, "slowok", func(c *config.GraftResolver) { c.InlineTimeout = "1s" })
+	const timeout = 30 * time.Second
+	p := newInlineProbe(t, "", func(c *config.GraftResolver) { c.InlineTimeout = "30s" })
 	budget := &landInlineBudget{}
 	ctx := withLandInlineBudget(p.fx.ctx, budget)
-
-	start := time.Now()
-	resolved := 0
-	for i := 0; i < members; i++ {
-		if p.resolve(ctx, t, newLandPreResolution()) == landInlineResolved {
-			resolved++
-		}
+	var given []time.Duration
+	var calls atomic.Int32
+	p.s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
+		calls.Add(1)
+		given = append(given, allowed)
+		return context.WithTimeout(ctx, allowed)
 	}
-	stalled := time.Since(start)
 
-	require.Positive(t, resolved, "a rule that ends in time is taken")
-	require.Less(t, resolved, members, "but not for every member")
-	require.Less(t, inlineCalls(t, p.dir), members, "the members that found the budget spent did not call")
-	require.Less(t, stalled, 1800*time.Millisecond, "the lane stalled for the budget, not for 6 x 0.4 s")
-	require.GreaterOrEqual(t, budget.lost, 400*time.Millisecond)
+	// The first member is given the whole timeout, its rule ends, and the time of the call is charged.
+	require.Equal(t, landInlineResolved, p.resolve(ctx, t, newLandPreResolution()), "a rule that ends in time is taken")
+	require.Positive(t, budget.lost, "the time of a call that succeeds is charged")
+	// A slow call would have charged 29 s: the next member is given what is left, 1 s.
+	budget.lost = 29 * time.Second
+	require.Equal(t, landInlineResolved, p.resolve(ctx, t, newLandPreResolution()))
+	require.Equal(t, []time.Duration{timeout, timeout - 29*time.Second}, given, "each member is given the rest of the budget")
+	// And that one spent it: the other members go out of the lane without a call.
+	budget.lost = timeout
+	for i := 2; i < members; i++ {
+		require.Equal(t, landInlineSlow, p.resolve(ctx, t, newLandPreResolution()), "member %d", i+1)
+	}
+	require.EqualValues(t, 2, calls.Load(), "the members that found the budget spent did not call")
 }
 
 // TestUserLand_aRuleSlowerThanTheTimeoutLandsOnAHotFile: a rule takes 2 s, longer than inline_timeout, on a file that
