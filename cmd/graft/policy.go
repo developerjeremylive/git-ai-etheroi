@@ -29,7 +29,9 @@ FILE before a server reloads it (SIGUSR1). It changes nothing.
 - Always: FILE is read as a server reads it, its policy is validated as a
   reload validates it, and its rules are printed with their numbers and the
   policy's SHA-256 (the server exports it as graft_policy_info). An invalid
-  policy exits 2: a reload would reject it and keep the policy in force.
+  policy exits 2: a reload would reject it and keep the policy in force. The
+  rest of the file is not validated: a reload also checks it against the
+  server's paths and settings, and rejects a file that fails there.
 - With -repo REPO (repeatable) and the server's address: the last N
   changesets of each repository (--limit, default 1000) are read with the
   token, and each reference update is evaluated with the candidate policy as
@@ -38,7 +40,8 @@ FILE before a server reloads it (SIGUSR1). It changes nothing.
 
 What it cannot show: an update that the policy in force refused is not in the
 changeset log. The check lists what the candidate would newly deny among what
-happened, not what it would newly allow.`
+happened, not what it would newly allow. A batched land whose list of members
+the log cut short is checked for the members it lists.`
 
 // defaultPolicyCheckLimit is the number of changesets of each repository that
 // graft policy check reads by default.
@@ -248,9 +251,11 @@ func policyCheckRepository(ctx context.Context, repo *sdk.Repo, graft config.Gra
 }
 
 // lastChangesets returns the last limit changesets of repo, in ascending
-// order. The log is dense (sequences start at 1 and have no gaps), so its last
-// sequence is found by a search of the cursors that still return a changeset,
-// one call of a single changeset per step, before the changesets are read.
+// order. The last sequence is found by a search of the cursors that still
+// return a changeset (a cursor does exactly when a later sequence exists), one
+// call of a single changeset per step, before the changesets are read. The log
+// is dense (sequences start at 1 and have no gaps), so the changesets after
+// last-limit are the last limit ones.
 func lastChangesets(ctx context.Context, repo *sdk.Repo, limit int) ([]*sdk.Changeset, error) {
 	exists := func(after uint64) (bool, error) {
 		changesets, err := repo.Changesets(ctx, after, 1)
