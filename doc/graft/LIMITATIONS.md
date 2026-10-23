@@ -118,8 +118,16 @@ Git hooks use private.
 
 ### Standalone mode
 
-- The access policy is read at startup. Changing it needs a restart. There is
-  no management API for policies.
+- The access policy is reloaded from the configuration file on SIGUSR1
+  (CONFIGURATION.md, "Reloading the policy"); every other setting, the agents
+  and their tokens included, needs a restart. There is no management API for
+  policies, and a reload is per node: nodes that share a storage core run
+  different policies between their reloads.
+- A caller that is not an agent (the shared token, or no token) is checked by
+  the policy only in pre-receive, before the references are locked. A reload
+  between its pre-receive and its commit can let one of its updates through
+  under the previous policy. An agent's update is decided again by the
+  reference-transaction hook with the policy in force.
 - Policy globs use `path.Match` semantics with a trailing `**`: `prefix/**`
   matches every reference below `prefix/` at any depth (not `prefix` itself),
   and a bare `**` matches every reference. Invalid globs and empty `refs`
@@ -362,20 +370,18 @@ Git hooks use private.
 Ordered roughly by the order we intend to work on them. None of this is a
 commitment.
 
-1. Live policy reload, with a file watch or a signal, and a dry-run mode that
-   reports what a policy change would allow.
-2. Eager derived data for `lastmod` and blame when a change lands, with metrics
+1. Eager derived data for `lastmod` and blame when a change lands, with metrics
    for hit rates. Phase 3 computes `graph` and `changed-paths` eagerly.
-3. Changeset log retention, and an offset index of the file log that survives
+2. Changeset log retention, and an offset index of the file log that survives
    a restart.
-4. Client-side help for every conflict: `graft land --resolve --conflicts-dir
+3. Client-side help for every conflict: `graft land --resolve --conflicts-dir
    DIR` writes the conflicts of a land (the merged files with conflict markers,
    the three sides and the resolver's proposals) into DIR, and
    `graft land --resolved DIR` lands the result. A land without `--resolve`
    that fails with `merge_conflict` writes nothing yet, and the files are not
    written into the workspace itself (see [RESOLVE](RESOLVE.md)).
-5. Multi-node cache tiers with explicit invalidation for mutable keys.
-6. Signed changesets and a verifiable export of the log.
+4. Multi-node cache tiers with explicit invalidation for mutable keys.
+5. Signed changesets and a verifiable export of the log.
 
 ## Phase 4b limitations
 
