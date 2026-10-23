@@ -12,6 +12,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/grpc/client"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -150,26 +151,22 @@ func (rr *Repo) ReadReference(ctx context.Context, name git.ReferenceName) (git.
 
 // exactCommit reads the reference named name by its exact name: exists tells whether it exists,
 // and commit is the commit it points to, empty when it points to another object or to one that is
-// missing. RefExists checks the exact name (show-ref --verify, without listing the references below
-// it; a dangling symbolic reference does not exist), and only then FindCommit resolves it, by the
-// full name, which is the first name git's DWIM rules try.
+// missing.
+//
+// A branch is read with FindBranch, which reads it by its exact name and answers its commit in one
+// call. Any other reference is checked with RefExists (exact: show-ref --verify, without listing the
+// references below it; a dangling symbolic reference does not exist) and only then resolved with
+// FindCommit, by the full name, which is the first name git's DWIM rules try. No RPC reads such a
+// reference exactly with its value, so a reference deleted between the two calls resolves by git's
+// rules, possibly through a decoy such as refs/refs/tags/x.
 func (rr *Repo) exactCommit(ctx context.Context, name git.ReferenceName) (commit git.ObjectID, exists bool, returnedErr error) {
-	resp, err := gitalypb.NewRefServiceClient(rr.conn).RefExists(ctx, &gitalypb.RefExistsRequest{
-		Repository: rr.Repository,
-		Ref:        []byte(name),
-	})
-	if err != nil {
-		// A reference whose object is missing is answered with this detail; any other error,
-		// the detail missing included, is a failure.
-		for _, detail := range status.Convert(err).Details() {
-			if refErr, ok := detail.(*gitalypb.RefExistsError); ok && refErr.GetUnresolvableReference() != nil {
-				return "", true, nil
-			}
-		}
-		return "", false, fmt.Errorf("ref exists: %w", err)
+	if branch, ok := name.Branch(); ok {
+		return rr.exactBranchCommit(ctx, name, branch)
 	}
-	if !resp.GetValue() {
-		return "", false, nil
+
+	exists, unresolvable, err := rr.refExists(ctx, name)
+	if err != nil || !exists || unresolvable {
+		return "", exists, err
 	}
 
 	commit, err = rr.ResolveRevision(ctx, name.Revision())
@@ -177,6 +174,63 @@ func (rr *Repo) exactCommit(ctx context.Context, name git.ReferenceName) (commit
 		return "", true, nil
 	}
 	return commit, true, err
+}
+
+// exactBranchCommit is exactCommit for the branch named branch, whose reference is name, with
+// FindBranch. FindBranch answers no branch when it does not exist, and fails with "target reference
+// is ambiguous" when it does not exist but branches below its name do (refs/heads/x/y): that is a
+// missing branch too. It also fails for a branch that does not point to a commit (its object is
+// missing, or it is another object). Such a failure is classified with RefExists and FindCommit, as
+// exactCommit reads other references: a branch that exists but does not peel to a commit exists
+// without one, one that does not exist is missing, and anything else is FindBranch's failure. The
+// commit FindCommit may answer is never taken, so a branch is only ever answered by FindBranch.
+func (rr *Repo) exactBranchCommit(ctx context.Context, name git.ReferenceName, branch string) (git.ObjectID, bool, error) {
+	resp, err := gitalypb.NewRefServiceClient(rr.conn).FindBranch(ctx, &gitalypb.FindBranchRequest{
+		Repository: rr.Repository,
+		Name:       []byte(branch),
+	})
+	if err != nil {
+		if st := status.Convert(err); st.Code() == codes.InvalidArgument && strings.HasPrefix(st.Message(), "target reference is ambiguous") {
+			return "", false, nil
+		}
+		exists, unresolvable, existsErr := rr.refExists(ctx, name)
+		switch {
+		case existsErr != nil:
+		case !exists:
+			return "", false, nil
+		case unresolvable:
+			return "", true, nil
+		default:
+			if _, resolveErr := rr.ResolveRevision(ctx, name.Revision()); errors.Is(resolveErr, git.ErrReferenceNotFound) {
+				return "", true, nil
+			}
+		}
+		return "", false, fmt.Errorf("find branch: %w", err)
+	}
+	if resp.GetBranch() == nil {
+		return "", false, nil
+	}
+
+	return git.ObjectID(resp.GetBranch().GetTargetCommit().GetId()), true, nil
+}
+
+// refExists reports whether the reference named name exists, with RefExists, and whether its object
+// is missing (unresolvable): RefExists answers such a reference with an UnresolvableReference
+// detail. Any other error, the detail missing included, is a failure.
+func (rr *Repo) refExists(ctx context.Context, name git.ReferenceName) (exists, unresolvable bool, returnedErr error) {
+	resp, err := gitalypb.NewRefServiceClient(rr.conn).RefExists(ctx, &gitalypb.RefExistsRequest{
+		Repository: rr.Repository,
+		Ref:        []byte(name),
+	})
+	if err != nil {
+		for _, detail := range status.Convert(err).Details() {
+			if refErr, ok := detail.(*gitalypb.RefExistsError); ok && refErr.GetUnresolvableReference() != nil {
+				return true, true, nil
+			}
+		}
+		return false, false, fmt.Errorf("ref exists: %w", err)
+	}
+	return resp.GetValue(), false, nil
 }
 
 // HasBranches will dial to the remote repository and check whether the repository has any branches.

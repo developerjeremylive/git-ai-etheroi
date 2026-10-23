@@ -927,6 +927,31 @@ func TestStartBranchLocalAndRemoteAgree(t *testing.T) {
 			},
 		},
 		{
+			// x/y is below the name x, which does not exist: the remote-tracking branch x is taken.
+			desc: "a branch below a missing branch, before a remote-tracking branch",
+			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/heads/x/y", git.ObjectID(setup.commit.GetId()))
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/remotes/x", setup.base)
+				return setup.base.String()
+			},
+		},
+		{
+			// A dangling symbolic branch has no value: the remote-tracking branch x is taken.
+			desc: "a dangling symbolic branch, before a remote-tracking branch",
+			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
+				gittest.Exec(t, cfg, "-C", setup.repoPath, "symbolic-ref", "refs/heads/x", "refs/heads/nope")
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/remotes/x", setup.base)
+				return setup.base.String()
+			},
+		},
+		{
+			desc: "a symbolic branch",
+			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
+				gittest.Exec(t, cfg, "-C", setup.repoPath, "symbolic-ref", "refs/heads/x", git.DefaultRef.String())
+				return setup.base.String()
+			},
+		},
+		{
 			desc: "a branch and a tag of its name at a tree",
 			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
 				tree := strings.TrimSpace(string(gittest.Exec(t, cfg, "-C", setup.repoPath, "rev-parse", setup.base.String()+"^{tree}")))
