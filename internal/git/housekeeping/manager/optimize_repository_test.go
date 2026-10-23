@@ -1680,17 +1680,35 @@ func TestRepositoryManager_CleanStaleData_reftable(t *testing.T) {
 
 	for _, tc := range []struct {
 		desc            string
+		lock            string
 		age             time.Duration
 		expected        bool
 		expectedMetrics cleanStaleDataMetrics
 	}{
 		{
 			desc:     "fresh lock",
+			lock:     "tables.list.lock",
 			age:      0,
 			expected: true,
 		},
 		{
 			desc:     "stale lock",
+			lock:     "tables.list.lock",
+			age:      housekeeping.ReftableLockfileGracePeriod + time.Minute,
+			expected: false,
+			expectedMetrics: cleanStaleDataMetrics{
+				reftablelocks: 1,
+			},
+		},
+		{
+			desc:     "fresh table lock",
+			lock:     "0x000000000001-0x000000000002-0123abcd.ref.lock",
+			age:      0,
+			expected: true,
+		},
+		{
+			desc:     "stale table lock",
+			lock:     "0x000000000001-0x000000000002-0123abcd.ref.lock",
 			age:      housekeeping.ReftableLockfileGracePeriod + time.Minute,
 			expected: false,
 			expectedMetrics: cleanStaleDataMetrics{
@@ -1709,7 +1727,7 @@ func TestRepositoryManager_CleanStaleData_reftable(t *testing.T) {
 			})
 			repo := localrepo.NewTestRepo(t, cfg, repoProto)
 
-			path := filepath.Join(repoPath, "reftable", "tables.list.lock")
+			path := filepath.Join(repoPath, "reftable", tc.lock)
 
 			require.NoError(t, os.WriteFile(path, []byte{}, mode.File))
 			filetime := time.Now().Add(-tc.age)
