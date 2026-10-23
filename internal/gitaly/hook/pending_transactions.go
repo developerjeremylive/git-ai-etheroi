@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/feder-cr/git-ai/internal/git"
-	"github.com/feder-cr/git-ai/internal/graft/changelog"
+	"github.com/feder-cr/git-ai/internal/graft/refchange"
 )
 
 const (
@@ -225,6 +225,6 @@ func referencesContained(inner, outer []byte) bool {
 // updatedReference returns the reference of one line of the
 // reference-transaction hook's input.
 func updatedReference(line []byte) (string, bool) {
-	_, _, reference, ok := changelog.ParseHookLine(string(line))
+	_, _, reference, ok := refchange.ParseHookLine(string(line))
 	return reference, ok
 }

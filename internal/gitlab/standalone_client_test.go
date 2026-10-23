@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
+	"github.com/feder-cr/git-ai/internal/graft/policyeval"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/stretchr/testify/require"
 )
@@ -385,60 +386,6 @@ func TestStandaloneClient_Allowed_IgnoresOtherParams(t *testing.T) {
 	require.Empty(t, msg)
 }
 
-// TestEvaluatePolicy checks the policy evaluation that the reference-transaction
-// hook shares with Allowed: it must decide exactly like the standalone client.
-func TestEvaluatePolicy(t *testing.T) {
-	t.Parallel()
-
-	policy := []config.GraftPolicyRule{
-		{Actor: "planner", Refs: []string{"refs/heads/main"}, Allow: true},
-		{Refs: []string{"refs/heads/main"}, Allow: false},
-		{Refs: []string{"refs/heads/**"}, Allow: true},
-	}
-	client := NewStandaloneClient(config.Graft{Policy: policy}, testhelper.SharedLogger(t))
-
-	for _, tc := range []struct {
-		desc    string
-		policy  []config.GraftPolicyRule
-		actor   string
-		changes string
-		allowed bool
-		message string
-		err     string
-	}{
-		{desc: "empty policy allows", actor: "builder", changes: changesFor("refs/heads/main"), allowed: true},
-		{desc: "privileged actor allowed", policy: policy, actor: "planner", changes: changesFor("refs/heads/main"), allowed: true},
-		{desc: "open branch allowed", policy: policy, actor: "builder", changes: changesFor("refs/heads/feature"), allowed: true},
-		{desc: "protected branch denied", policy: policy, actor: "builder", changes: changesFor("refs/heads/feature", "refs/heads/main"), message: `policy denies "builder" to update "refs/heads/main" (rule 2)`},
-		{desc: "ungoverned reference denied", policy: policy, actor: "builder", changes: changesFor("refs/tags/v1"), message: `policy denies "builder" to update "refs/tags/v1": no matching rule`},
-		{desc: "malformed changes", policy: policy, actor: "builder", changes: "only two\n", err: "malformed change"},
-		{desc: "reference with Unicode whitespace allowed by its name", policy: policy, actor: "builder", changes: changesFor("refs/heads/a\u00a0b", "refs/heads/x\u0085y"), allowed: true},
-		{desc: "reference with Unicode whitespace denied by its name", policy: policy, actor: "builder", changes: changesFor("refs/tags/v\u2000main"), message: `policy denies "builder" to update "refs/tags/v\u2000main": no matching rule`},
-		{desc: "reference that is not valid UTF-8 allowed by its name", policy: policy, actor: "builder", changes: changesFor("refs/heads/caf\xe9"), allowed: true},
-		{desc: "tab-separated change is malformed", policy: policy, actor: "builder", changes: testOldOID + "\t" + testNewOID + "\trefs/heads/feature\n", err: "malformed change"},
-	} {
-		t.Run(tc.desc, func(t *testing.T) {
-			t.Parallel()
-
-			allowed, message, err := EvaluatePolicy(tc.policy, tc.actor, tc.changes)
-			if tc.err != "" {
-				require.ErrorContains(t, err, tc.err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tc.allowed, allowed)
-			require.Equal(t, tc.message, message)
-
-			if tc.policy != nil {
-				clientAllowed, clientMessage, err := client.Allowed(testhelper.Context(t), AllowedParams{GLID: tc.actor, Changes: tc.changes})
-				require.NoError(t, err)
-				require.Equal(t, allowed, clientAllowed)
-				require.Equal(t, message, clientMessage)
-			}
-		})
-	}
-}
-
 func TestStandaloneClient_Allowed_DoesNotShareConfigPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -531,63 +478,57 @@ func TestStandaloneClient_OtherCallbacks(t *testing.T) {
 	})
 }
 
-func TestMatchRef(t *testing.T) {
+// TestStandaloneClient_AllowedDecidesAsEvaluate checks the policy evaluation that the
+// reference-transaction hook shares with Allowed (policyeval.Evaluate): the standalone client must
+// decide exactly like it.
+func TestStandaloneClient_AllowedDecidesAsEvaluate(t *testing.T) {
 	t.Parallel()
 
+	policy := []config.GraftPolicyRule{
+		{Actor: "planner", Refs: []string{"refs/heads/main"}, Allow: true},
+		{Refs: []string{"refs/heads/main"}, Allow: false},
+		{Refs: []string{"refs/heads/**"}, Allow: true},
+	}
+	client := NewStandaloneClient(config.Graft{Policy: policy}, testhelper.SharedLogger(t))
+
 	for _, tc := range []struct {
-		glob    string
-		ref     string
-		matches bool
-		err     bool
+		desc    string
+		policy  []config.GraftPolicyRule
+		actor   string
+		changes string
+		allowed bool
+		message string
+		err     string
 	}{
-		{glob: "refs/heads/main", ref: "refs/heads/main", matches: true},
-		{glob: "refs/heads/main", ref: "refs/heads/dev", matches: false},
-		{glob: "refs/heads/*", ref: "refs/heads/main", matches: true},
-		{glob: "refs/heads/*", ref: "refs/heads/a/main", matches: false},
-		{glob: "refs/heads/**", ref: "refs/heads/main", matches: true},
-		{glob: "refs/heads/**", ref: "refs/heads/a/b/c", matches: true},
-		{glob: "refs/heads/**", ref: "refs/heads", matches: false},
-		{glob: "refs/heads/**", ref: "refs/tags/v1", matches: false},
-		{glob: "refs/heads/**", ref: "refs/headsx/main", matches: false},
-		{glob: "refs/*/**", ref: "refs/tags/v1/x", matches: true},
-		{glob: "refs/*/**", ref: "refs/tags/v1", matches: true},
-		{glob: "**", ref: "refs/heads/main", matches: true},
-		{glob: "**", ref: "main", matches: true},
-		{glob: "refs/heads/release**", ref: "refs/heads/release/1.0", matches: true},
-		{glob: "refs/heads/release**", ref: "refs/heads/release-2", matches: true},
-		{glob: "refs/heads/release**", ref: "refs/heads/release", matches: true},
-		{glob: "refs/heads/release**", ref: "refs/heads/main", matches: false},
-		{glob: "refs/*/rel**", ref: "refs/heads/rel/a/b", matches: true},
-		{glob: "refs/heads/[**", ref: "refs/heads/main", err: true},
-		{glob: "refs/heads/[", ref: "refs/heads/main", err: true},
-		{glob: "refs/heads/[/**", ref: "refs/heads/main", err: true},
-		{glob: "refs/heads/[/**", ref: "x", err: true},
+		{desc: "empty policy allows", actor: "builder", changes: changesFor("refs/heads/main"), allowed: true},
+		{desc: "privileged actor allowed", policy: policy, actor: "planner", changes: changesFor("refs/heads/main"), allowed: true},
+		{desc: "open branch allowed", policy: policy, actor: "builder", changes: changesFor("refs/heads/feature"), allowed: true},
+		{desc: "protected branch denied", policy: policy, actor: "builder", changes: changesFor("refs/heads/feature", "refs/heads/main"), message: `policy denies "builder" to update "refs/heads/main" (rule 2)`},
+		{desc: "ungoverned reference denied", policy: policy, actor: "builder", changes: changesFor("refs/tags/v1"), message: `policy denies "builder" to update "refs/tags/v1": no matching rule`},
+		{desc: "malformed changes", policy: policy, actor: "builder", changes: "only two\n", err: "malformed change"},
+		{desc: "reference with Unicode whitespace allowed by its name", policy: policy, actor: "builder", changes: changesFor("refs/heads/a\u00a0b", "refs/heads/x\u0085y"), allowed: true},
+		{desc: "reference with Unicode whitespace denied by its name", policy: policy, actor: "builder", changes: changesFor("refs/tags/v\u2000main"), message: `policy denies "builder" to update "refs/tags/v\u2000main": no matching rule`},
+		{desc: "reference that is not valid UTF-8 allowed by its name", policy: policy, actor: "builder", changes: changesFor("refs/heads/caf\xe9"), allowed: true},
+		{desc: "tab-separated change is malformed", policy: policy, actor: "builder", changes: testOldOID + "\t" + testNewOID + "\trefs/heads/feature\n", err: "malformed change"},
 	} {
-		t.Run(fmt.Sprintf("%s:%s", tc.glob, tc.ref), func(t *testing.T) {
+		t.Run(tc.desc, func(t *testing.T) {
 			t.Parallel()
 
-			matches, err := matchRef(tc.glob, tc.ref)
-			if tc.err {
-				require.Error(t, err)
+			allowed, message, err := policyeval.Evaluate(tc.policy, tc.actor, tc.changes)
+			if tc.err != "" {
+				require.ErrorContains(t, err, tc.err)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tc.matches, matches)
+			require.Equal(t, tc.allowed, allowed)
+			require.Equal(t, tc.message, message)
+
+			if tc.policy != nil {
+				clientAllowed, clientMessage, err := client.Allowed(testhelper.Context(t), AllowedParams{GLID: tc.actor, Changes: tc.changes})
+				require.NoError(t, err)
+				require.Equal(t, allowed, clientAllowed)
+				require.Equal(t, message, clientMessage)
+			}
 		})
 	}
-}
-
-func TestParseChangedRefs(t *testing.T) {
-	t.Parallel()
-
-	refs, err := parseChangedRefs("")
-	require.NoError(t, err)
-	require.Empty(t, refs)
-
-	refs, err = parseChangedRefs(changesFor("refs/heads/a", "refs/tags/b"))
-	require.NoError(t, err)
-	require.Equal(t, []string{"refs/heads/a", "refs/tags/b"}, refs)
-
-	_, err = parseChangedRefs("only two\n")
-	require.Error(t, err)
 }

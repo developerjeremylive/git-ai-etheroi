@@ -15,10 +15,11 @@ import (
 	"github.com/feder-cr/git-ai/internal/git/gitcmd"
 	"github.com/feder-cr/git-ai/internal/git/mvcc"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
-	"github.com/feder-cr/git-ai/internal/gitlab"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
+	"github.com/feder-cr/git-ai/internal/graft/policyeval"
 	"github.com/feder-cr/git-ai/internal/graft/policystore"
+	"github.com/feder-cr/git-ai/internal/graft/refchange"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/structerr"
 	"github.com/feder-cr/git-ai/internal/transaction/voting"
@@ -563,7 +564,7 @@ func (m *GitLabHookManager) graftPolicyDecision(policy *policystore.Snapshot, en
 		return "", false, nil
 	}
 
-	message, err = graftPolicyDenial(policy.Rules, meta.Actor, changes)
+	message, err = policyeval.Denial(policy.Rules, meta.Actor, changes)
 	if err != nil {
 		return "", true, fmt.Errorf("evaluating graft policy: %w", err)
 	}
@@ -595,7 +596,7 @@ func CheckAgentPolicy(ctx context.Context, graft config.Graft, changes string) e
 		return nil
 	}
 
-	message, err := graftPolicyDenial(graft.Policy, id.Name, []byte(changes))
+	message, err := policyeval.Denial(graft.Policy, id.Name, []byte(changes))
 	if err != nil {
 		return structerr.NewInternal("evaluating graft policy: %w", err)
 	}
@@ -605,34 +606,6 @@ func CheckAgentPolicy(ctx context.Context, graft config.Graft, changes string) e
 	}
 
 	return nil
-}
-
-// graftPolicyDenial returns the message of the denial of the update of the
-// governed references in changes by actor, or an empty message when the policy
-// allows the update. Only references under refs/ and HEAD are governed, see
-// isGovernedReference.
-func graftPolicyDenial(policy []config.GraftPolicyRule, actor string, changes []byte) (string, error) {
-	var governed strings.Builder
-	for _, line := range strings.Split(string(changes), "\n") {
-		// Lines that are not well formed are kept, so that the policy rejects them.
-		if _, _, reference, ok := changelog.ParseHookLine(line); ok && !isGovernedReference(reference) {
-			continue
-		}
-
-		governed.WriteString(line)
-		governed.WriteString("\n")
-	}
-
-	allowed, message, err := gitlab.EvaluatePolicy(policy, actor, governed.String())
-	if err != nil {
-		return "", err
-	}
-
-	if allowed {
-		return "", nil
-	}
-
-	return message, nil
 }
 
 // GraftReservedRefPrefix is the namespace of the references that only the server writes: the
@@ -649,17 +622,11 @@ const GraftReservedRefPrefix = "refs/graft/"
 // GraftReservedRefPrefix, or "".
 func graftReservedDenial(changes []byte) string {
 	for _, line := range strings.Split(string(changes), "\n") {
-		if _, _, reference, ok := changelog.ParseHookLine(line); ok && strings.HasPrefix(reference, GraftReservedRefPrefix) {
+		if _, _, reference, ok := refchange.ParseHookLine(line); ok && strings.HasPrefix(reference, GraftReservedRefPrefix) {
 			return fmt.Sprintf("%q is under %s, which is reserved for the server: agents may not update it", reference, GraftReservedRefPrefix)
 		}
 	}
 	return ""
-}
-
-// isGovernedReference reports whether the standalone access policy governs an
-// update of reference: every reference under refs/, and HEAD.
-func isGovernedReference(reference string) bool {
-	return reference == "HEAD" || strings.HasPrefix(reference, "refs/")
 }
 
 // isForceDeletionsOnly determines whether the given changes only consist of force-deletions.

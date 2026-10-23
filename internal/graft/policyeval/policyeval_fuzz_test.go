@@ -1,11 +1,11 @@
-package gitlab
+package policyeval
 
 import (
 	"strings"
 	"testing"
 
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
-	"github.com/feder-cr/git-ai/internal/graft/changelog"
+	"github.com/feder-cr/git-ai/internal/graft/refchange"
 )
 
 // FuzzParseChangedRefs fuzzes the parser of the change set that the standalone
@@ -39,7 +39,7 @@ func FuzzParseChangedRefs(f *testing.F) {
 				t.Fatal("empty reference returned")
 			}
 
-			if _, _, _, ok := changelog.ParseHookLine(fuzzPolicyOID + " " + fuzzPolicyOID + " " + ref); !ok {
+			if _, _, _, ok := refchange.ParseHookLine(fuzzPolicyOID + " " + fuzzPolicyOID + " " + ref); !ok {
 				t.Fatalf("reference %q does not form a valid hook line", ref)
 			}
 		}
@@ -95,10 +95,10 @@ func FuzzMatchRef(f *testing.F) {
 	})
 }
 
-// FuzzEvaluatePolicy fuzzes the policy decision for a change set. An allowed
+// FuzzEvaluate fuzzes the policy decision for a change set. An allowed
 // change set must be made of references that the single rule of the policy
 // allows, and a denial must come with a message.
-func FuzzEvaluatePolicy(f *testing.F) {
+func FuzzEvaluate(f *testing.F) {
 	f.Add(fuzzPolicyOID+" "+fuzzPolicyOID+" refs/heads/main\n", "agent-1", true, "refs/heads/**")
 	f.Add(fuzzPolicyOID+" "+fuzzPolicyOID+" refs/heads/main\n", "agent-1", false, "refs/heads/main")
 	f.Add(fuzzPolicyOID+" "+fuzzPolicyOID+" refs/tags/v1\n", "agent-1", true, "refs/heads/**")
@@ -112,7 +112,7 @@ func FuzzEvaluatePolicy(f *testing.F) {
 			policy = []config.GraftPolicyRule{{Actor: "*", Refs: []string{refGlob}, Allow: allow}}
 		}
 
-		allowed, message, err := EvaluatePolicy(policy, actor, changes)
+		allowed, message, err := Evaluate(policy, actor, changes)
 		if err != nil {
 			if allowed {
 				t.Fatal("allowed together with an error")

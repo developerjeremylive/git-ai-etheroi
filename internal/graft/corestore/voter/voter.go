@@ -42,6 +42,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/graft/corestore"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/gitops"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/localrefs"
+	"github.com/feder-cr/git-ai/internal/graft/refchange"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/structerr"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
@@ -1047,7 +1048,7 @@ func parseInput(changes []byte, hash git.ObjectHash) ([]inputUpdate, error) {
 			continue
 		}
 
-		oldValue, newValue, name, ok := changelog.ParseHookLine(line)
+		oldValue, newValue, name, ok := refchange.ParseHookLine(line)
 		if !ok {
 			return nil, fmt.Errorf("line %q is not <old> <new> <ref>", line)
 		}

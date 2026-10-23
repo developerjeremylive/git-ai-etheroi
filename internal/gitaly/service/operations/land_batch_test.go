@@ -12,10 +12,10 @@ import (
 	"github.com/feder-cr/git-ai/internal/git"
 	"github.com/feder-cr/git-ai/internal/git/gittest"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
-	"github.com/feder-cr/git-ai/internal/gitaly/hook"
 	"github.com/feder-cr/git-ai/internal/gitaly/service"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policyeval"
 	"github.com/feder-cr/git-ai/internal/graft/resolver"
 	"github.com/feder-cr/git-ai/internal/structerr"
 	"github.com/feder-cr/git-ai/internal/testhelper"
@@ -587,12 +587,12 @@ func TestEvaluateGraftPolicyForBatchedActors(t *testing.T) {
 	const zero = "0000000000000000000000000000000000000000"
 	const newOID = "1111111111111111111111111111111111111111"
 
-	allowed, message, err := hook.EvaluateGraftPolicy(policy, "bot-1", "refs/heads/main", zero, newOID)
+	allowed, message, err := policyeval.EvaluateUpdate(policy.Policy, "bot-1", "refs/heads/main", zero, newOID)
 	require.NoError(t, err)
 	require.False(t, allowed)
 	require.Contains(t, message, "bot-1")
 
-	allowed, message, err = hook.EvaluateGraftPolicy(policy, "alice", "refs/heads/main", zero, newOID)
+	allowed, message, err = policyeval.EvaluateUpdate(policy.Policy, "alice", "refs/heads/main", zero, newOID)
 	require.NoError(t, err)
 	require.True(t, allowed)
 	require.Empty(t, message)

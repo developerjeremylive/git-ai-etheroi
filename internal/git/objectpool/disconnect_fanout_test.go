@@ -19,10 +19,14 @@ type recordingWAL struct {
 	links       []string
 }
 
-func (w *recordingWAL) CreateDirectory(relativePath string)          { w.directories = append(w.directories, relativePath) }
-func (w *recordingWAL) RemoveDirectoryEntry(string)                  {}
-func (w *recordingWAL) CreateFile(string, string) error              { return nil }
-func (w *recordingWAL) CreateLink(sourcePath, destinationPath string) { w.links = append(w.links, destinationPath) }
+func (w *recordingWAL) CreateDirectory(relativePath string) {
+	w.directories = append(w.directories, relativePath)
+}
+func (w *recordingWAL) RemoveDirectoryEntry(string)     {}
+func (w *recordingWAL) CreateFile(string, string) error { return nil }
+func (w *recordingWAL) CreateLink(sourcePath, destinationPath string) {
+	w.links = append(w.links, destinationPath)
+}
 
 // TestDisconnect_fanOutDirectoryRemoved removes each loose object directory of the repository right
 // before the first links into it, three times, as housekeeping may (git prune-packed removes empty

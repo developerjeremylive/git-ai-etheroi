@@ -12,6 +12,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/hook/updateref"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policyeval"
 	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/structerr"
@@ -282,7 +283,7 @@ func (st *serverLandBatchStepper) Land(ctx context.Context, tip git.ObjectID, re
 // runs as the graft-batch user, so every member is checked here, before it enters the running tip.
 // A denied request fails alone with the reason of the policy.
 func (st *serverLandBatchStepper) admit(req *landBatchRequest, reference git.ReferenceName, oldOID, newOID git.ObjectID) error {
-	allowed, message, err := hook.EvaluateGraftPolicy(config.Graft{Policy: st.policy.Rules}, req.actor, reference.String(), oldOID.String(), newOID.String())
+	allowed, message, err := policyeval.EvaluateUpdate(st.policy.Rules, req.actor, reference.String(), oldOID.String(), newOID.String())
 	if err != nil {
 		return structerr.NewInternal("evaluating graft policy: %w", err)
 	}

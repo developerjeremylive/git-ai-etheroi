@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
-	"github.com/feder-cr/git-ai/internal/gitaly/hook"
+	"github.com/feder-cr/git-ai/internal/graft/policyeval"
 	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/sdk"
 )
@@ -220,7 +220,7 @@ func policyCheckRepository(ctx context.Context, repo *sdk.Repo, graft config.Gra
 		}
 		reference := string(cs.GetReference())
 		for _, actor := range actors {
-			allowed, reason, err := hook.EvaluateGraftPolicy(graft, actor, reference, cs.GetOldOid(), cs.GetNewOid())
+			allowed, reason, err := policyeval.EvaluateUpdate(graft.Policy, actor, reference, cs.GetOldOid(), cs.GetNewOid())
 			if err != nil {
 				return policyRepository{}, fmt.Errorf("changeset %d: %w", cs.GetSequence(), err)
 			}
