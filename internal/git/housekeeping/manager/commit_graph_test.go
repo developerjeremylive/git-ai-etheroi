@@ -8,11 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feder-cr/git-ai/internal/featureflag"
 	"github.com/feder-cr/git-ai/internal/git"
+	"github.com/feder-cr/git-ai/internal/git/catfile"
 	"github.com/feder-cr/git-ai/internal/git/gittest"
 	"github.com/feder-cr/git-ai/internal/git/housekeeping"
 	"github.com/feder-cr/git-ai/internal/git/localrepo"
+	"github.com/feder-cr/git-ai/internal/git/quarantine"
 	"github.com/feder-cr/git-ai/internal/git/stats"
+	"github.com/feder-cr/git-ai/internal/gitaly/config"
 	gitalycfgprom "github.com/feder-cr/git-ai/internal/gitaly/config/prometheus"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
@@ -148,24 +152,60 @@ func testWriteCommitGraphIfIdleConcurrentWithOptimizeRepository(t *testing.T, ct
 
 	parents := map[string]git.ObjectID{}
 	commits := 0
-	writeCommit := func(branch string) {
+	locator := config.NewLocator(cfg)
+	objectHash := gittest.DefaultObjectHash
+	// One factory serves every commit, including those of the background goroutine: building a
+	// test repository there could fail the test from outside its goroutine.
+	catfileCache := catfile.NewCache(cfg)
+	t.Cleanup(catfileCache.Stop)
+	repoFactory := localrepo.NewFactory(testhelper.SharedLogger(t), locator, gittest.NewCommandFactory(t, cfg), catfileCache)
+	// writeCommit lands a commit on branch as the server's write RPCs do: it is written into a
+	// quarantine, which Migrate links into the repository, and then the branch is updated. A
+	// commit written straight into the repository's object directory would race housekeeping's
+	// git prune-packed, which removes an empty fan-out directory between git's mkdir of it and
+	// the single retry of its write (git's create_tmpfile). Migrate creates the directory again.
+	writeCommit := func(branch string) error {
 		commits++
-		opts := []gittest.WriteCommitOption{
-			gittest.WithBranch(branch),
-			gittest.WithMessage(fmt.Sprintf("%s %d", branch, commits)),
+		quarantineDir, cleanup, err := quarantine.New(ctx, repoProto, testhelper.SharedLogger(t), locator)
+		if err != nil {
+			return fmt.Errorf("quarantine: %w", err)
 		}
+		defer cleanup()
+
+		var commitParents []git.ObjectID
+		old := objectHash.ZeroOID
 		if parent, ok := parents[branch]; ok {
-			opts = append(opts, gittest.WithParents(parent))
+			commitParents = []git.ObjectID{parent}
+			old = parent
 		}
-		parents[branch] = gittest.WriteCommit(t, cfg, repoPath, opts...)
+		// The commits are not signed, as the server's own commits without a signing key.
+		writeCtx := featureflag.ContextWithFeatureFlag(ctx, featureflag.GPGSigning, false)
+		commit, err := repoFactory.Build(quarantineDir.QuarantinedRepo()).WriteCommit(writeCtx, localrepo.WriteCommitConfig{
+			TreeID:        objectHash.EmptyTreeOID,
+			Parents:       commitParents,
+			AuthorName:    "writer",
+			CommitterName: "writer",
+			Message:       fmt.Sprintf("%s %d", branch, commits),
+		})
+		if err != nil {
+			return fmt.Errorf("writing commit: %w", err)
+		}
+		if err := quarantineDir.Migrate(ctx); err != nil {
+			return fmt.Errorf("migrating quarantine: %w", err)
+		}
+		if out, err := gittest.NewCommand(t, cfg, "-C", repoPath, "update-ref", "refs/heads/"+branch, commit.String(), old.String()).CombinedOutput(); err != nil {
+			return fmt.Errorf("updating %s: %w: %s", branch, err, out)
+		}
+		parents[branch] = commit
+		return nil
 	}
 
 	for i := 0; i < 50; i++ {
-		writeCommit("main")
+		require.NoError(t, writeCommit("main"))
 	}
 
 	for round := 0; round < 15; round++ {
-		writeCommit("main")
+		require.NoError(t, writeCommit("main"))
 
 		var wg sync.WaitGroup
 		var backgroundErr error
@@ -177,7 +217,10 @@ func testWriteCommitGraphIfIdleConcurrentWithOptimizeRepository(t *testing.T, ct
 			// that the writes overlap with the commit-graph step of housekeeping. A write
 			// without new commits would not take the chain lock.
 			for {
-				writeCommit("side")
+				if err := writeCommit("side"); err != nil {
+					backgroundErr = err
+					return
+				}
 
 				wrote, err := manager.WriteCommitGraphIfIdle(ctx, repo)
 				if err != nil {

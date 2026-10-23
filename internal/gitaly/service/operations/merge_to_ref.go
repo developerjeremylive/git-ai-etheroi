@@ -91,9 +91,18 @@ func (s *Server) UserMergeToRef(ctx context.Context, request *gitalypb.UserMerge
 		return nil, structerr.NewInternal("could not read target reference: %w", err)
 	}
 
+	// The merge is written into a quarantine, migrated before the reference update: a loose object
+	// written straight into the repository would race housekeeping's removal of empty loose object
+	// directories, which the migration survives.
+	quarantineDir, quarantineRepo, cleanup, err := s.quarantinedRepo(ctx, request.GetRepository())
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
 	mergeCommitID, err := s.merge(
 		ctx,
-		repo,
+		quarantineRepo,
 		authorSignature,
 		authorSignature,
 		string(request.GetMessage()),
@@ -147,6 +156,10 @@ func (s *Server) UserMergeToRef(ctx context.Context, request *gitalypb.UserMerge
 	// reports that it failed. Checking the policy here returns the denial itself.
 	if err := hook.CheckAgentPolicy(ctx, s.graft, fmt.Sprintf("%s %s %s\n", oldTargetOID, mergeOID, request.GetTargetRef())); err != nil {
 		return nil, err
+	}
+
+	if err := quarantineDir.Migrate(ctx); err != nil {
+		return nil, structerr.NewInternal("migrating quarantined objects: %w", err)
 	}
 
 	if err := repo.UpdateRef(ctx, git.ReferenceName(request.GetTargetRef()), mergeOID, oldTargetOID); err != nil {

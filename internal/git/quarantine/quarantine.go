@@ -334,30 +334,18 @@ func (m *migration) link(sourcePath, targetPath string) error {
 // it was removed (see migrate).
 func (m *migration) linkFile(sourcePath, targetPath string) error {
 	dir := filepath.Dir(targetPath)
-	for {
-		if err := ensureDir(dir); err != nil {
-			return err
-		}
-
-		beforeLink(targetPath)
-
-		err := finalizeObjectFile(sourcePath, targetPath)
-		if err == nil {
-			return m.track(dir)
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-
-		if _, statErr := os.Lstat(sourcePath); statErr != nil {
-			return fmt.Errorf("%w (source: %w)", err, statErr)
-		}
-		if ctxErr := m.ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("%w (%w)", err, ctxErr)
-		}
-
-		// The source exists, so the target directory is gone: create it again and link again.
+	if err := ensureDir(dir); err != nil {
+		return err
 	}
+
+	if err := storage.LinkRecreatingDirectory(m.ctx, sourcePath, targetPath, func() error {
+		beforeLink(targetPath)
+		return finalizeObjectFile(sourcePath, targetPath)
+	}); err != nil {
+		return err
+	}
+
+	return m.track(dir)
 }
 
 // beforeLink runs before each link of the first pass of migrate. Tests replace it to remove a

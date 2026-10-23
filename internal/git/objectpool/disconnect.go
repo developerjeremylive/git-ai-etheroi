@@ -102,12 +102,18 @@ func Disconnect(ctx context.Context, f storage.FS, repo *localrepo.Repo, logger 
 			return fmt.Errorf("source relative path: %w", err)
 		}
 		targetRelativePath := filepath.Join(repositoryRelativePath, "objects", path)
+		targetDir := filepath.Dir(targetRelativePath)
 
-		if err := storage.MkdirAll(f, filepath.Dir(targetRelativePath)); err != nil {
+		if err := storage.MkdirAll(f, targetDir); err != nil {
 			return err
 		}
 
-		if err := storage.Link(f, sourceRelativePath, targetRelativePath); err != nil {
+		// Housekeeping of the repository may remove an empty loose object directory before
+		// the link into it: it is created again.
+		if err := storage.LinkRecreatingDirectory(ctx, filepath.Join(f.Root(), sourceRelativePath), filepath.Join(f.Root(), targetRelativePath), func() error {
+			beforeLink(targetRelativePath)
+			return storage.Link(f, sourceRelativePath, targetRelativePath)
+		}); err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				continue
 			}
@@ -132,6 +138,11 @@ func Disconnect(ctx context.Context, f storage.FS, repo *localrepo.Repo, logger 
 
 	return removeAlternatesIfOk(ctx, repo, altFile, backupFile, logger, txManager)
 }
+
+// beforeLink runs before each link of an object file of the pool into the repository, with the
+// target path relative to the storage. Tests replace it to remove the target directory at that
+// point, as housekeeping may.
+var beforeLink = func(targetRelativePath string) {}
 
 func findObjectFiles(altDir string) ([]string, error) {
 	var objectFiles []string
