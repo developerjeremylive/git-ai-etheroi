@@ -12,6 +12,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitlab"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/grpc/backchannel"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
@@ -151,6 +152,9 @@ func TestReferenceTransactionHook_batchPolicySkip(t *testing.T) {
 			payloadCtx := identity.NewContext(ctx, identity.Identity{Name: "builder", Source: identity.SourceAgent})
 			payloadCtx = changelog.WithOperation(payloadCtx, tc.operation)
 			payloadCtx = changelog.WithBatch(payloadCtx, tc.members)
+			// A batch carries the generation of the policy it admitted its members under: the
+			// startup policy here, as in the server.
+			payloadCtx = policystore.WithAdmissionGeneration(payloadCtx, 1)
 
 			env, err := gitcmd.NewHooksPayload(
 				payloadCtx,

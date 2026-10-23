@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"time"
 
@@ -50,6 +51,7 @@ import (
 	_ "github.com/feder-cr/git-ai/internal/graft/derived/graph" // registers the graph warmer
 	"github.com/feder-cr/git-ai/internal/graft/eager"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/graft/resolver"
 	"github.com/feder-cr/git-ai/internal/grpc/backchannel"
 	"github.com/feder-cr/git-ai/internal/grpc/client"
@@ -126,6 +128,11 @@ func serveAction(ctx context.Context, cmd *cli.Command) error {
 		cli.ShowSubcommandHelpAndExit(cmd, 2)
 	}
 
+	// The reload signal is caught from the start: its default action ends the process, and an
+	// operator or gitaly-wrapper may send it while the server starts.
+	policySignals := notifyPolicyReload()
+	defer signal.Stop(policySignals)
+
 	cfg, logger, err := configure(cmd.Args().First())
 	if err != nil {
 		return exitWithError(logger, "failed to configure Gitaly", err)
@@ -154,7 +161,7 @@ func serveAction(ctx context.Context, cmd *cli.Command) error {
 	logger.WithField("version", version.GetVersion()).Info("Starting Gitaly")
 	fips.Check()
 
-	if err := run(cmd, cfg, logger); err != nil {
+	if err := run(cmd, cfg, logger, policySignals); err != nil {
 		return exitWithError(logger, "unclean Gitaly shutdown", err)
 	}
 
@@ -216,10 +223,10 @@ func configure(configPath string) (config.Cfg, log.Logger, error) {
 // callbacks. In Graft standalone mode it is the built-in policy client and
 // GitLab is never contacted. Otherwise it is the stub client when hooks are
 // bypassed for testing, and the GitLab HTTP client in all other cases.
-func newGitlabAPIClient(logger log.Logger, cfg config.Cfg) (gitlab.Client, error) {
+func newGitlabAPIClient(logger log.Logger, cfg config.Cfg, policy *policystore.Store) (gitlab.Client, error) {
 	if cfg.Graft.Standalone {
 		logger.Info("graft standalone mode: access checks use the built-in policy, GitLab is not contacted")
-		return gitlab.NewStandaloneClient(cfg.Graft, logger), nil
+		return gitlab.NewStandaloneClientWithPolicy(policy, logger), nil
 	}
 
 	if skipHooks, _ := env.GetBool("GITALY_TESTING_NO_GIT_HOOKS", false); skipHooks {
@@ -274,9 +281,13 @@ func preloadLicenseDatabase(logger log.Logger) {
 	}()
 }
 
-func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger) error {
+func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger, policySignals chan os.Signal) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// The configuration as the file gave it, before the setup below changes some of it (the
+	// runtime directory): a reload of the policy compares the file with it.
+	loaded := cfg
 
 	// shutdownCtx is cancelled once the graceful shutdown period has elapsed. It lets
 	// services terminate work that intentionally ignores the per-request context, such
@@ -584,7 +595,14 @@ func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger) error {
 		mvccMiddleware,
 	)
 
-	gitlabClient, err := newGitlabAPIClient(logger, cfg)
+	// The standalone access policy is held by one store, which every reader decides with and
+	// SIGUSR1 reloads from the configuration file (doc/graft/PLAN12.md).
+	graftPolicy := policystore.New(cfg.Graft.Policy)
+	prometheus.MustRegister(graftPolicy)
+	stopPolicyReload := reloadPolicyOnSignal(logger, appCtx.Args().First(), loaded, graftPolicy, policySignals)
+	defer stopPolicyReload()
+
+	gitlabClient, err := newGitlabAPIClient(logger, cfg, graftPolicy)
 	if err != nil {
 		return err
 	}
@@ -621,7 +639,7 @@ func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger) error {
 	// storage core.
 	prometheus.MustRegister(reviewroots.DefaultSweeper)
 
-	hookManagerOpts := []hook.ManagerOption{hook.WithEagerObserver(eagerObserver)}
+	hookManagerOpts := []hook.ManagerOption{hook.WithEagerObserver(eagerObserver), hook.WithPolicyStore(graftPolicy)}
 	var (
 		storageSyncer corestore.Freshener
 		storageGate   *gate.Gate
@@ -832,6 +850,7 @@ func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger) error {
 			ArchiveCache:           archiveStreamCache,
 			PoolMetadataStore:      poolMetadataStore,
 			GitlabClient:           gitlabClient,
+			GraftPolicy:            graftPolicy,
 			ObjectPoolStateManager: objectPoolStateManager,
 			PostReceiveRegistry:    postReceiveRegistry,
 			GraftLandLanes:         landLanes,

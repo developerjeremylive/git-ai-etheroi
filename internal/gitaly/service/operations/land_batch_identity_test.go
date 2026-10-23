@@ -15,6 +15,8 @@ import (
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
+	"github.com/feder-cr/git-ai/internal/graft/requestdefaults"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
@@ -30,19 +32,27 @@ import (
 const testAgentHeader = "x-test-agent"
 
 // agentInterceptors authenticates each request as the agent named in its test header, the way the
-// per-agent token authentication does, so that every request carries its own identity.
-func agentInterceptors(log.Logger, localrepo.Factory) ([]grpc.UnaryServerInterceptor, []grpc.StreamServerInterceptor) {
-	return []grpc.UnaryServerInterceptor{
-		func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-			if md, ok := metadata.FromIncomingContext(ctx); ok {
-				if names := md.Get(testAgentHeader); len(names) > 0 {
-					ctx = identity.NewContext(ctx, identity.Identity{Name: names[0], Source: identity.SourceAgent})
+// per-agent token authentication does, so that every request carries its own identity. In
+// standalone mode it then fills the request's defaults from that identity, as the server does right
+// after authentication (requestdefaults): the gl_id and gl_username of an agent's request are the
+// agent's name. The test interceptors run after the server's own, which saw no identity yet.
+func agentInterceptors(standalone bool) testserver.InterceptorsFunc {
+	return func(log.Logger, localrepo.Factory) ([]grpc.UnaryServerInterceptor, []grpc.StreamServerInterceptor) {
+		return []grpc.UnaryServerInterceptor{
+			func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+				if md, ok := metadata.FromIncomingContext(ctx); ok {
+					if names := md.Get(testAgentHeader); len(names) > 0 {
+						ctx = identity.NewContext(ctx, identity.Identity{Name: names[0], Source: identity.SourceAgent})
+					}
 				}
-			}
 
-			return handler(ctx, req)
-		},
-	}, nil
+				if standalone {
+					return requestdefaults.UnaryServerInterceptor(ctx, req, info, handler)
+				}
+				return handler(ctx, req)
+			},
+		}, nil
+	}
 }
 
 // agentLandClient is the client of a service that setupAgentLandService started. lanes are the land
@@ -58,6 +68,15 @@ type agentLandClient struct {
 func setupAgentLandService(t *testing.T, ctx context.Context, graft config.Graft) (context.Context, config.Cfg, agentLandClient) {
 	t.Helper()
 
+	return setupAgentLandServiceWith(t, ctx, graft, policystore.New(graft.Policy))
+}
+
+// setupAgentLandServiceWith is setupAgentLandService with the store of the policy, which every
+// reader of the policy reads (the access check of pre-receive, the hook and the service), and more
+// options of the server.
+func setupAgentLandServiceWith(t *testing.T, ctx context.Context, graft config.Graft, policy *policystore.Store, options ...testserver.GitalyServerOpt) (context.Context, config.Cfg, agentLandClient) {
+	t.Helper()
+
 	cfg := testcfg.Build(t, testcfg.WithBase(config.Cfg{Graft: graft}))
 	var lanes *landlane.Shared
 	if graft.Standalone && !graft.Land.Batch.Disabled {
@@ -69,10 +88,11 @@ func setupAgentLandService(t *testing.T, ctx context.Context, graft config.Graft
 
 	testcfg.BuildGitalySSH(t, cfg)
 	testcfg.BuildGitalyHooks(t, cfg)
-	cfg.SocketPath = runOperationServiceServerWithLanes(t, cfg, lanes,
-		testserver.WithInterceptors(agentInterceptors),
-		testserver.WithGitLabClient(gitlab.NewStandaloneClient(graft, testhelper.NewLogger(t))),
-	)
+	cfg.SocketPath = runOperationServiceServerWithLanes(t, cfg, lanes, append([]testserver.GitalyServerOpt{
+		testserver.WithInterceptors(agentInterceptors(graft.Standalone)),
+		testserver.WithGraftPolicy(policy),
+		testserver.WithGitLabClient(gitlab.NewStandaloneClientWithPolicy(policy, testhelper.NewLogger(t))),
+	}, options...)...)
 	client, conn := newOperationClient(t, cfg.SocketPath)
 	t.Cleanup(func() { conn.Close() })
 	ctx = testhelper.MergeOutgoingMetadata(ctx, testcfg.GitalyServersMetadataFromCfg(t, cfg))

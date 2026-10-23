@@ -100,6 +100,7 @@ func commandTable() map[string]command {
 		"review":  reviewCommand(),
 		"storage": storageCommand(),
 		"repo":    repoCommand(),
+		"policy":  policyCommand(),
 	}
 }
 
@@ -276,6 +277,8 @@ commands:
   storage SUBCOMMAND     import, state, verify, checkpoint, gc a repository in the storage core; gc --removed for a storage (--connectivity, --dry-run, --json)
   repo create REPO       create a repository, with the shared token (--default-branch, --object-format,
                          --initial-commit [--branch NAME], --json)
+  policy check FILE      validate the access policy of a configuration file before a reload, and list
+                         what it would deny among recent changesets (-repo, --limit, --json)
 
 environment: GRAFT_ADDRESS, GRAFT_TOKEN, GRAFT_STORAGE, GRAFT_USER, GRAFT_AUTHOR
 

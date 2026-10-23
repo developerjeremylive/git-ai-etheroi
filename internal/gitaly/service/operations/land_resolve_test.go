@@ -27,6 +27,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/service"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/graft/resolver"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
@@ -282,6 +283,7 @@ func (fx resolveFixture) server(t *testing.T, rcfg config.GraftResolver) *Server
 		catfileCache:     cache,
 		locator:          locator,
 		localRepoFactory: localrepo.NewFactory(testhelper.NewLogger(t), locator, gittest.NewCommandFactory(t, fx.cfg), cache),
+		graftPolicy:      policystore.New(nil),
 	}
 }
 
@@ -687,7 +689,7 @@ func TestResolveLandConflicts_refusedFailedAndDisabled(t *testing.T) {
 	})
 
 	t.Run("disabled", func(t *testing.T) {
-		s := &Server{gitConfig: fx.cfg.Git, resolveCfg: config.GraftResolver{}, conflictResolver: nil}
+		s := &Server{gitConfig: fx.cfg.Git, resolveCfg: config.GraftResolver{}, conflictResolver: nil, graftPolicy: policystore.New(nil)}
 
 		_, err := s.resolveLandConflicts(fx.ctx, fx.request("Land"), fx.repo, fx.tip, fx.commit, fx.committer())
 		require.ErrorContains(t, err, "not enabled")

@@ -800,7 +800,7 @@ func TestInvalidReferenceNames(t *testing.T) {
 		"refs/heads/a@{1}",
 		"refs/heads/a\x01b",
 	} {
-		// changelog.ParseHookLine already rejects a line whose name has a
+		// refchange.ParseHookLine already rejects a line whose name has a
 		// control character, before the name itself is validated.
 		lineRejected := strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f })
 

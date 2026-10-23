@@ -659,41 +659,6 @@ func TestParseUpdates(t *testing.T) {
 	}
 }
 
-func TestParseHookLine(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		desc      string
-		line      string
-		reference string
-		ok        bool
-	}{
-		{desc: "update", line: oidA + " " + oidB + " refs/heads/main", reference: "refs/heads/main", ok: true},
-		{desc: "symbolic values", line: "ref:refs/heads/a ref:refs/heads/b HEAD", reference: "HEAD", ok: true},
-		{desc: "no-break space", line: oidA + " " + oidB + " refs/heads/a\u00a0b", reference: "refs/heads/a\u00a0b", ok: true},
-		{desc: "next line", line: oidA + " " + oidB + " refs/heads/x\u0085y", reference: "refs/heads/x\u0085y", ok: true},
-		{desc: "trailing Unicode whitespace", line: oidA + " " + oidB + " refs/heads/z\u2028", reference: "refs/heads/z\u2028", ok: true},
-		{desc: "invalid UTF-8", line: oidA + " " + oidB + " refs/heads/caf\xe9", reference: "refs/heads/caf\xe9", ok: true},
-		{desc: "trailing carriage return", line: oidA + " " + oidB + " refs/heads/main\r", reference: "refs/heads/main", ok: true},
-		{desc: "empty", line: ""},
-		{desc: "two fields", line: oidA + " " + oidB},
-		{desc: "empty reference", line: oidA + " " + oidB + " "},
-		{desc: "space in the reference", line: oidA + " " + oidB + " refs/heads/main extra"},
-		{desc: "tab separators", line: oidA + "\t" + oidB + "\trefs/heads/main"},
-		{desc: "control character in the reference", line: oidA + " " + oidB + " refs/heads/a\x01b"},
-		{desc: "DEL in the reference", line: oidA + " " + oidB + " refs/heads/a\x7fb"},
-		{desc: "leading space", line: " " + oidA + " " + oidB + " refs/heads/main"},
-	} {
-		t.Run(tc.desc, func(t *testing.T) {
-			t.Parallel()
-
-			_, _, reference, ok := ParseHookLine(tc.line)
-			require.Equal(t, tc.ok, ok)
-			require.Equal(t, tc.reference, reference)
-		})
-	}
-}
-
 func TestAppend_referencesThatAreNotValidUTF8AreStoredLosslessly(t *testing.T) {
 	t.Parallel()
 

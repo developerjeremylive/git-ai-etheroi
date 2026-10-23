@@ -22,6 +22,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitlab"
 	"github.com/feder-cr/git-ai/internal/graft/corestore"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/graft/resolver"
 	"github.com/feder-cr/git-ai/internal/grpc/backchannel"
 	"github.com/feder-cr/git-ai/internal/grpc/client"
@@ -33,15 +34,18 @@ import (
 
 // Dependencies assembles set of components required by different kinds of services.
 type Dependencies struct {
-	Logger                 log.Logger
-	Cfg                    config.Cfg
-	GitalyHookManager      gitalyhook.Manager
-	TransactionManager     transaction.Manager
-	StorageLocator         storage.Locator
-	ClientPool             *client.Pool
-	GitCmdFactory          gitcmd.CommandFactory
-	BackchannelRegistry    *backchannel.Registry
-	GitlabClient           gitlab.Client
+	Logger              log.Logger
+	Cfg                 config.Cfg
+	GitalyHookManager   gitalyhook.Manager
+	TransactionManager  transaction.Manager
+	StorageLocator      storage.Locator
+	ClientPool          *client.Pool
+	GitCmdFactory       gitcmd.CommandFactory
+	BackchannelRegistry *backchannel.Registry
+	GitlabClient        gitlab.Client
+	// GraftPolicy holds the standalone access policy in force, which the server reloads
+	// (doc/graft/PLAN12.md). Nil means the static policy of Cfg.
+	GraftPolicy            *policystore.Store
 	CatfileCache           catfile.Cache
 	DiskCache              cache.Cache
 	PackObjectsCache       streamcache.Cache
@@ -135,6 +139,15 @@ func (dc *Dependencies) GetCgroupsManager() cgroups.Manager {
 // GetBackchannelRegistry returns a registry of the backchannels.
 func (dc *Dependencies) GetBackchannelRegistry() *backchannel.Registry {
 	return dc.BackchannelRegistry
+}
+
+// GetGraftPolicy returns the store of the standalone access policy in force: GraftPolicy, or a
+// store of the static policy of the configuration when it is not set.
+func (dc *Dependencies) GetGraftPolicy() *policystore.Store {
+	if dc.GraftPolicy != nil {
+		return dc.GraftPolicy
+	}
+	return policystore.New(dc.Cfg.Graft.Policy)
 }
 
 // GetGitlabClient returns client to access GitLab API.

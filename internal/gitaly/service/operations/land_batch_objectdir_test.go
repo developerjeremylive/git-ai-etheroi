@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
 	"github.com/stretchr/testify/require"
@@ -17,7 +18,7 @@ func TestLandBatchable_requestWithObjectDirectoryLandsAlone(t *testing.T) {
 
 	ctx := testhelper.Context(t)
 	// The lanes are only checked for presence: a request that is excluded never reaches the factory.
-	s := &Server{landLanes: &landBatchLanes{}, graft: config.Graft{Standalone: true}}
+	s := &Server{landLanes: &landBatchLanes{}, graft: config.Graft{Standalone: true}, graftPolicy: policystore.New(nil)}
 
 	newRequest := func(repo *gitalypb.Repository) *gitalypb.UserLandRequest {
 		return &gitalypb.UserLandRequest{

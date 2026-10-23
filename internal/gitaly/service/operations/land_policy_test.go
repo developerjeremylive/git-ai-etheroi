@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,7 @@ func TestLandPrecheckResolution_policyFirst(t *testing.T) {
 	fx := newResolveFixture(t, rcfg)
 	s := fx.server(t, rcfg)
 	s.graft = gitalycfg.Graft{Standalone: true, Policy: []gitalycfg.GraftPolicyRule{{Actor: "agent-7", Refs: []string{"refs/heads/other"}, Allow: true}}}
+	s.graftPolicy = policystore.New(s.graft.Policy)
 	ctx := identity.NewContext(fx.ctx, identity.Identity{Name: "agent-7", Source: identity.SourceAgent})
 	in := fx.request("Land")
 	in.Resolution = resolutionOf(fx, "agent-a\n", "agent-b\n")
@@ -34,6 +36,7 @@ func TestLandPrecheckResolution_policyFirst(t *testing.T) {
 
 	// An agent the policy lets update the branch gets its resolution checked and verified.
 	s.graft.Policy = []gitalycfg.GraftPolicyRule{{Actor: "agent-7", Refs: []string{"refs/heads/**"}, Allow: true}}
+	s.graftPolicy = policystore.New(s.graft.Policy)
 	pc, err = s.landPrecheckResolution(ctx, in, fx.repo)
 	require.NoError(t, err)
 	require.NotNil(t, pc)

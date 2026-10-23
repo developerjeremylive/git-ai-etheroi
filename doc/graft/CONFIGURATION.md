@@ -86,7 +86,7 @@ reference, the first rule that applies decides:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `actor` | string | `""` (everybody) | Glob (`path.Match` syntax) matched against the actor of the request: the agent of the token, or the acting user ID for the shared token. |
-| `refs` | array of strings | `[]` (every reference) | Globs matched against fully qualified references such as `refs/heads/main`. Syntax is `path.Match`, plus a trailing `/**` that matches any depth, so `refs/heads/**` matches `refs/heads/feature/x`, and any other trailing `**` that matches any remainder, so `refs/heads/release**` matches `refs/heads/release/1.0`. Invalid globs and empty entries are rejected at startup. |
+| `refs` | array of strings | `[]` (every reference) | Globs matched against fully qualified references such as `refs/heads/main`. Syntax is `path.Match`, plus a trailing `/**` that matches any depth, so `refs/heads/**` matches `refs/heads/feature/x`, and any other trailing `**` that matches any remainder, so `refs/heads/release**` matches `refs/heads/release/1.0`. Invalid globs and empty entries are rejected at startup, and by a reload, which keeps the policy in force. |
 | `allow` | bool | `false` | Whether a matching update is allowed. |
 
 Example: protect `main` for everybody except the `planner` agent, and allow
@@ -106,7 +106,43 @@ allow = false
 allow = true
 ```
 
-The policy is read at startup. A change needs a restart.
+#### Reloading the policy
+
+Send SIGUSR1 to the gitaly process (or to gitaly-wrapper, which forwards it):
+it reads its configuration file again and puts the new `[[graft.policy]]` in
+force. SIGHUP is not a reload: it stops the server, or upgrades it in place
+with the graceful-upgrade bootstrap.
+
+- Only the policy is applied. Other changes of the file, `[[graft.agent]]`
+  included, are logged at WARN as needing a restart, and not applied.
+- A file that cannot be read, or whose policy is invalid (a bad glob, an empty
+  `refs` entry), is logged at ERROR and changes nothing: the policy in force
+  stays. Actors of the new policy that name no configured agent are logged at
+  WARN; they are not an error (an actor can be the user ID of a caller with
+  the shared token).
+- An update in flight is decided by the policy in force when the
+  reference-transaction hook runs, while git holds the references' locks: a
+  tightening applies to it even if its earlier checks allowed it. A land batch
+  whose members were admitted under another policy is refused there, and its
+  requests land alone, each decided by the policy in force. A batch attempt
+  judges each of its members with the policy in force when the attempt
+  started: a loosening reaches the members of the next attempt.
+- Each node reloads its own file: reload every node, then compare their
+  `graft_policy_info`.
+
+Metrics: `graft_policy_reloads_total{result}` (`applied`, `unchanged`,
+`rejected`), `graft_policy_generation` (1 at startup, one more for every
+applied reload) and `graft_policy_info{sha256}` (1 for the hash of the
+policy in force). A denied agent update is logged at INFO with the
+`policy_generation` and `policy_sha256` that denied it; an allowed one at
+DEBUG.
+
+Before a reload, `graft policy check FILE` validates the file's policy as the
+reload will (exit 2 when the policy is invalid) and prints its hash; with
+`-repo REPO` it lists the recent updates of the repository that the new policy
+would deny. It checks the policy only: the reload also validates the rest of
+the file, against the server's own paths and settings, and rejects a file that
+fails there.
 
 ### `[[graft.agent]]`
 

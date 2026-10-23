@@ -12,6 +12,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/transaction"
 	"github.com/feder-cr/git-ai/internal/gitlab"
 	"github.com/feder-cr/git-ai/internal/graft/eager"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/helper"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
@@ -85,6 +86,9 @@ type GitLabHookManager struct {
 	// observer receives the committed reference updates, see
 	// ReferenceTransactionHook. A nil observer does nothing.
 	observer *eager.Observer
+	// policy holds the standalone access policy in force (doc/graft/PLAN12.md). It is never nil:
+	// without WithPolicyStore it holds the policy of cfg.
+	policy *policystore.Store
 	// storageVoter commits reference transactions to the Graft storage core, nil when it is off.
 	storageVoter StorageVoter
 	// startLandIntentsCompaction starts a compaction of land intents that a prepared
@@ -102,6 +106,15 @@ type ManagerOption func(*GitLabHookManager)
 func WithEagerObserver(observer *eager.Observer) ManagerOption {
 	return func(m *GitLabHookManager) {
 		m.observer = observer
+	}
+}
+
+// WithPolicyStore sets the store of the standalone access policy that the reference-transaction hook
+// decides with, the one the server reloads. Without it the hook decides with the policy of the
+// configuration.
+func WithPolicyStore(store *policystore.Store) ManagerOption {
+	return func(m *GitLabHookManager) {
+		m.policy = store
 	}
 }
 
@@ -184,6 +197,9 @@ func NewManager(
 
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.policy == nil {
+		m.policy = policystore.New(cfg.Graft.Policy)
 	}
 
 	return m

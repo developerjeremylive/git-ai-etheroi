@@ -15,6 +15,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/storage"
 	"github.com/feder-cr/git-ai/internal/gitaly/transaction"
 	"github.com/feder-cr/git-ai/internal/graft/corestore"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/graft/resolver"
 	"github.com/feder-cr/git-ai/internal/grpc/client"
 	"github.com/feder-cr/git-ai/internal/log"
@@ -25,15 +26,18 @@ import (
 //nolint:revive // This is unintentionally missing documentation.
 type Server struct {
 	gitalypb.UnimplementedOperationServiceServer
-	logger           log.Logger
-	hookManager      hook.Manager
-	txManager        transaction.Manager
-	locator          storage.Locator
-	conns            *client.Pool
-	catfileCache     catfile.Cache
-	updater          *updateref.UpdaterWithHooks
-	gitConfig        config.Git
-	graft            config.Graft
+	logger       log.Logger
+	hookManager  hook.Manager
+	txManager    transaction.Manager
+	locator      storage.Locator
+	conns        *client.Pool
+	catfileCache catfile.Cache
+	updater      *updateref.UpdaterWithHooks
+	gitConfig    config.Git
+	graft        config.Graft
+	// graftPolicy holds the standalone access policy in force (doc/graft/PLAN12.md); graft.Policy
+	// is the one of the startup and is not read.
+	graftPolicy      *policystore.Store
 	localRepoFactory localrepo.Factory
 	// resolveCfg configures conflict resolution of UserLand.
 	resolveCfg config.GraftResolver
@@ -120,6 +124,7 @@ func NewServer(deps *service.Dependencies) *Server {
 		updater:          deps.GetUpdaterWithHooks(),
 		gitConfig:        deps.GetCfg().Git,
 		graft:            deps.GetCfg().Graft,
+		graftPolicy:      deps.GetGraftPolicy(),
 		localRepoFactory: deps.GetRepositoryFactory(),
 		resolveCfg:       resolveCfg,
 		conflictResolver: conflictResolver,
@@ -161,4 +166,17 @@ func (s *Server) ensureStorageFresh(ctx context.Context, repo *gitalypb.Reposito
 		return nil
 	}
 	return s.storageSync.EnsureFresh(ctx, repo)
+}
+
+// graftInForce returns the [graft] configuration with the standalone access policy that decides the
+// policy checks of ctx: the snapshot ctx carries, which a land batch attempt gives its members
+// (policystore.WithSnapshot), or else the policy the server holds now.
+func (s *Server) graftInForce(ctx context.Context) config.Graft {
+	graft := s.graft
+	if snapshot, ok := policystore.SnapshotFrom(ctx); ok {
+		graft.Policy = snapshot.Rules
+	} else {
+		graft.Policy = s.graftPolicy.Current().Rules
+	}
+	return graft
 }

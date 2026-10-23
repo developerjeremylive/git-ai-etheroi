@@ -15,9 +15,11 @@ import (
 	"github.com/feder-cr/git-ai/internal/git/gitcmd"
 	"github.com/feder-cr/git-ai/internal/git/mvcc"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
-	"github.com/feder-cr/git-ai/internal/gitlab"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
+	"github.com/feder-cr/git-ai/internal/graft/policyeval"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
+	"github.com/feder-cr/git-ai/internal/graft/refchange"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/structerr"
 	"github.com/feder-cr/git-ai/internal/transaction/voting"
@@ -459,38 +461,75 @@ func (m *GitLabHookManager) trackPendingTransaction(state ReferenceTransactionSt
 // The reservation of refs/graft/ (GraftReservedRefPrefix) applies to agents in every mode; the
 // rest of the policy applies only in standalone mode with a policy.
 func (m *GitLabHookManager) enforceGraftPolicy(ctx context.Context, env []string, changes []byte) error {
-	message, err := m.graftPolicyDecision(env, changes)
+	// One policy decides the whole transaction: the one in force now, while git holds the
+	// references' locks (doc/graft/PLAN12.md, section 5).
+	policy := m.policy.Current()
+	decision, err := m.graftPolicyDecision(policy, env, changes)
 	if err != nil {
 		return err
 	}
-
-	if message != "" {
-		meta, _ := gitcmd.ChangelogMetaFromEnv(env)
-		m.logger.WithFields(log.Fields{
-			"actor":  meta.Actor,
-			"reason": message,
-		}).InfoContext(ctx, "agent reference update denied")
-
-		return structerr.NewPermissionDenied("%s", message)
+	if !decision.evaluated && decision.denial == "" {
+		return nil
 	}
+
+	// A decision of the policy names the policy that took it, so that an operator can tell which
+	// generation decided an update while policies are reloaded: a denial at INFO, as before, and
+	// an allowed update at DEBUG, since agents land many times a second and the changelog already
+	// records who landed what. A denial of the reservation of refs/graft/ is no decision of the
+	// policy.
+	fields := log.Fields{"actor": decision.actor}
+	if decision.evaluated {
+		fields["policy_generation"] = policy.Generation
+		fields["policy_sha256"] = policy.SHA256
+	}
+	if decision.denial != "" {
+		fields["reason"] = decision.denial
+		m.logger.WithFields(fields).InfoContext(ctx, "agent reference update denied")
+
+		return structerr.NewPermissionDenied("%s", decision.denial)
+	}
+	m.logger.WithFields(fields).DebugContext(ctx, "agent reference update allowed by the policy")
 
 	return nil
 }
 
-// graftPolicyDecision is the decision of enforceGraftPolicy: the message of the
-// denial of the transaction, or an empty message when the policy allows it or
-// does not apply to it.
-func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (string, error) {
-	policyApplies := m.cfg.Graft.Standalone && len(m.cfg.Graft.Policy) > 0
+// graftDecision is the decision of graftPolicyDecision.
+type graftDecision struct {
+	// denial is the message of the denial of the transaction, or empty when the policy allows it
+	// or does not apply to it.
+	denial string
+	// evaluated tells whether the rules of the policy decided, rather than the reservation of
+	// refs/graft/ or the skips.
+	evaluated bool
+	// actor is the agent of the update, when the metadata names one.
+	actor string
+}
+
+// PolicyChangedError refuses the combined update of a land batch whose members were admitted under
+// another generation of the access policy than the one in force (doc/graft/PLAN12.md, section 5).
+// The batch then lands each request alone, under the policy in force.
+type PolicyChangedError struct {
+	// Admitted is the generation the batch admitted its members under (0 when the batch carried
+	// none), InForce the generation in force.
+	Admitted, InForce uint64
+}
+
+func (e PolicyChangedError) Error() string {
+	return fmt.Sprintf("the access policy changed during the land batch: its members were admitted under generation %d, generation %d is in force", e.Admitted, e.InForce)
+}
+
+// graftPolicyDecision is the decision of enforceGraftPolicy with policy.
+func (m *GitLabHookManager) graftPolicyDecision(policy *policystore.Snapshot, env []string, changes []byte) (graftDecision, error) {
+	policyApplies := m.cfg.Graft.Standalone && len(policy.Rules) > 0
 
 	meta, err := gitcmd.ChangelogMetaFromEnv(env)
 	if err != nil {
 		// The metadata names the agent of the update. Without agents and without a policy to
 		// apply there is nothing to decide; otherwise the update cannot be judged.
 		if !policyApplies && len(m.cfg.Graft.Agents) == 0 {
-			return "", nil
+			return graftDecision{}, nil
 		}
-		return "", fmt.Errorf("reading graft metadata: %w", err)
+		return graftDecision{}, fmt.Errorf("reading graft metadata: %w", err)
 	}
 
 	// A batched land has already checked the policy for every member in process,
@@ -505,30 +544,38 @@ func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (s
 	// call updates no references. The skip therefore gives it no new reach.
 	// Only the batch operation carries members, so any other update is still
 	// checked here.
-	if meta.Operation == changelog.OperationLandBatch && len(meta.Members) > 0 {
-		return "", nil
-	}
-
-	if !meta.Agent || meta.Actor == "" {
-		return "", nil
-	}
+	batch := meta.Operation == changelog.OperationLandBatch && len(meta.Members) > 0
+	agent := meta.Agent && meta.Actor != ""
 
 	// refs/graft/ is the server's, whatever the policy says and whether or not the server runs
 	// in standalone mode: it is not a rule of the policy but an invariant of the server, for
-	// every agent.
-	if message := graftReservedDenial(changes); message != "" {
-		return message, nil
-	}
-	if !policyApplies {
-		return "", nil
+	// every agent. A batch runs without an identity but lands the changes of its members, so it
+	// is held to the reservation too, before the batch skip below: a batch only ever updates
+	// its branch, and this keeps it so whatever builds it.
+	if batch || agent {
+		if message := graftReservedDenial(changes); message != "" {
+			return graftDecision{denial: message, actor: meta.Actor}, nil
+		}
 	}
 
-	message, err := graftPolicyDenial(m.cfg.Graft.Policy, meta.Actor, changes)
+	// The members of a batch were admitted under one generation of the policy. If another one is
+	// in force, a member it denies would be landed: the batch is refused, and its requests land
+	// alone, each judged by the policy in force. Outside standalone mode no member was admitted
+	// by a policy, so there is nothing to compare.
+	if batch && m.cfg.Graft.Standalone && meta.PolicyGeneration != policy.Generation {
+		return graftDecision{}, PolicyChangedError{Admitted: meta.PolicyGeneration, InForce: policy.Generation}
+	}
+
+	if batch || !agent || !policyApplies {
+		return graftDecision{}, nil
+	}
+
+	message, err := policyeval.Denial(policy.Rules, meta.Actor, changes)
 	if err != nil {
-		return "", fmt.Errorf("evaluating graft policy: %w", err)
+		return graftDecision{}, fmt.Errorf("evaluating graft policy: %w", err)
 	}
 
-	return message, nil
+	return graftDecision{denial: message, evaluated: true, actor: meta.Actor}, nil
 }
 
 // CheckAgentPolicy evaluates the standalone access policy for the reference
@@ -555,7 +602,7 @@ func CheckAgentPolicy(ctx context.Context, graft config.Graft, changes string) e
 		return nil
 	}
 
-	message, err := graftPolicyDenial(graft.Policy, id.Name, []byte(changes))
+	message, err := policyeval.Denial(graft.Policy, id.Name, []byte(changes))
 	if err != nil {
 		return structerr.NewInternal("evaluating graft policy: %w", err)
 	}
@@ -565,34 +612,6 @@ func CheckAgentPolicy(ctx context.Context, graft config.Graft, changes string) e
 	}
 
 	return nil
-}
-
-// graftPolicyDenial returns the message of the denial of the update of the
-// governed references in changes by actor, or an empty message when the policy
-// allows the update. Only references under refs/ and HEAD are governed, see
-// isGovernedReference.
-func graftPolicyDenial(policy []config.GraftPolicyRule, actor string, changes []byte) (string, error) {
-	var governed strings.Builder
-	for _, line := range strings.Split(string(changes), "\n") {
-		// Lines that are not well formed are kept, so that the policy rejects them.
-		if _, _, reference, ok := changelog.ParseHookLine(line); ok && !isGovernedReference(reference) {
-			continue
-		}
-
-		governed.WriteString(line)
-		governed.WriteString("\n")
-	}
-
-	allowed, message, err := gitlab.EvaluatePolicy(policy, actor, governed.String())
-	if err != nil {
-		return "", err
-	}
-
-	if allowed {
-		return "", nil
-	}
-
-	return message, nil
 }
 
 // GraftReservedRefPrefix is the namespace of the references that only the server writes: the
@@ -609,17 +628,11 @@ const GraftReservedRefPrefix = "refs/graft/"
 // GraftReservedRefPrefix, or "".
 func graftReservedDenial(changes []byte) string {
 	for _, line := range strings.Split(string(changes), "\n") {
-		if _, _, reference, ok := changelog.ParseHookLine(line); ok && strings.HasPrefix(reference, GraftReservedRefPrefix) {
+		if _, _, reference, ok := refchange.ParseHookLine(line); ok && strings.HasPrefix(reference, GraftReservedRefPrefix) {
 			return fmt.Sprintf("%q is under %s, which is reserved for the server: agents may not update it", reference, GraftReservedRefPrefix)
 		}
 	}
 	return ""
-}
-
-// isGovernedReference reports whether the standalone access policy governs an
-// update of reference: every reference under refs/, and HEAD.
-func isGovernedReference(reference string) bool {
-	return reference == "HEAD" || strings.HasPrefix(reference, "refs/")
 }
 
 // isForceDeletionsOnly determines whether the given changes only consist of force-deletions.

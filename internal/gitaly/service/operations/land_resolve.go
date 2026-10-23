@@ -103,7 +103,7 @@ func (s *Server) landResolveAt(
 	// An agent that may not update the branch gets nothing resolved, and no proposal is kept for
 	// it: the policy decides on the actor and the reference alone, so it is checked first.
 	reference := git.NewReferenceNameFromBranchName(string(in.GetBranch()))
-	if err := hook.CheckAgentPolicy(ctx, s.graft, fmt.Sprintf("%s %s %s\n", tip, commitID, reference)); err != nil {
+	if err := hook.CheckAgentPolicy(ctx, s.graftInForce(ctx), fmt.Sprintf("%s %s %s\n", tip, commitID, reference)); err != nil {
 		return landListing{}, nil, &landPolicyDeniedError{err: err}
 	}
 	l, err := landListConflicts(ctx, repo, tip, commitID, s.resolveCfg.MaxFileBytesOrDefault())
