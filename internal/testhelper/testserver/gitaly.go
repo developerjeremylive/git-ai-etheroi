@@ -35,6 +35,7 @@ import (
 	corestoresyncer "github.com/feder-cr/git-ai/internal/graft/corestore/syncer"
 	"github.com/feder-cr/git-ai/internal/graft/corestore/voter"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/grpc/backchannel"
 	"github.com/feder-cr/git-ai/internal/grpc/client"
 	"github.com/feder-cr/git-ai/internal/grpc/middleware/limithandler"
@@ -321,6 +322,8 @@ type gitalyServerDeps struct {
 	graftStorage           *corestore.Core
 	graftStorageSyncer     *corestoresyncer.Syncer
 	graftStorageGate       *gate.Gate
+	graftPolicy            *policystore.Store
+	hookMgrWrapper         func(hook.Manager) hook.Manager
 }
 
 func (gsd *gitalyServerDeps) createDependencies(tb testing.TB, ctx context.Context, cfg config.Cfg) *service.Dependencies {
@@ -384,7 +387,12 @@ func (gsd *gitalyServerDeps) createDependencies(tb testing.TB, ctx context.Conte
 
 	// The Graft storage core is wired as in serve.go: the voter in the hook manager, the syncer in
 	// the dependencies and, in authoritative mode, the gate interceptors (see runGitaly).
-	var hookManagerOpts []hook.ManagerOption
+	// One store of the standalone access policy serves the hook manager and the services, as in
+	// serve.go, so that a test that reloads it reaches every reader.
+	if gsd.graftPolicy == nil {
+		gsd.graftPolicy = policystore.New(cfg.Graft.Policy)
+	}
+	hookManagerOpts := []hook.ManagerOption{hook.WithPolicyStore(gsd.graftPolicy)}
 	if gsd.graftStorage.Enabled() {
 		if gsd.catfileCache == nil {
 			cache := catfile.NewCache(cfg)
@@ -411,6 +419,9 @@ func (gsd *gitalyServerDeps) createDependencies(tb testing.TB, ctx context.Conte
 			gsd.postReceiveRegistry,
 			hookManagerOpts...,
 		)
+	}
+	if gsd.hookMgrWrapper != nil {
+		gsd.hookMgr = gsd.hookMgrWrapper(gsd.hookMgr)
 	}
 
 	if gsd.catfileCache == nil {
@@ -511,6 +522,7 @@ func (gsd *gitalyServerDeps) createDependencies(tb testing.TB, ctx context.Conte
 		PoolMetadataStore:      gsd.poolMetadataStore,
 		ObjectPoolStateManager: gsd.objectPoolStateManager,
 		GraftLandLanes:         gsd.graftLandLanes,
+		GraftPolicy:            gsd.graftPolicy,
 	}
 }
 
@@ -554,6 +566,26 @@ func WithCgroupsManager(cgroupsManager cgroups.Manager) GitalyServerOpt {
 func WithGitLabClient(gitlabClient gitlab.Client) GitalyServerOpt {
 	return func(deps gitalyServerDeps) gitalyServerDeps {
 		deps.gitlabClient = gitlabClient
+		return deps
+	}
+}
+
+// WithGraftPolicy sets the store of the standalone access policy that the hook manager and the
+// services read, so that a test can reload the policy while the server runs. Without it, the server
+// has a store of the configuration's policy.
+func WithGraftPolicy(store *policystore.Store) GitalyServerOpt {
+	return func(deps gitalyServerDeps) gitalyServerDeps {
+		deps.graftPolicy = store
+		return deps
+	}
+}
+
+// WithHookManagerWrapper wraps the hook manager of the server, the one WithHookManager sets or the
+// server's own, with wrap: the services and the updater with hooks call the wrapper, which a test
+// uses to act at a point of the hooks.
+func WithHookManagerWrapper(wrap func(hook.Manager) hook.Manager) GitalyServerOpt {
+	return func(deps gitalyServerDeps) gitalyServerDeps {
+		deps.hookMgrWrapper = wrap
 		return deps
 	}
 }

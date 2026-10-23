@@ -15,6 +15,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
@@ -58,6 +59,15 @@ type agentLandClient struct {
 func setupAgentLandService(t *testing.T, ctx context.Context, graft config.Graft) (context.Context, config.Cfg, agentLandClient) {
 	t.Helper()
 
+	return setupAgentLandServiceWith(t, ctx, graft, policystore.New(graft.Policy))
+}
+
+// setupAgentLandServiceWith is setupAgentLandService with the store of the policy, which every
+// reader of the policy reads (the access check of pre-receive, the hook and the service), and more
+// options of the server.
+func setupAgentLandServiceWith(t *testing.T, ctx context.Context, graft config.Graft, policy *policystore.Store, options ...testserver.GitalyServerOpt) (context.Context, config.Cfg, agentLandClient) {
+	t.Helper()
+
 	cfg := testcfg.Build(t, testcfg.WithBase(config.Cfg{Graft: graft}))
 	var lanes *landlane.Shared
 	if graft.Standalone && !graft.Land.Batch.Disabled {
@@ -69,10 +79,11 @@ func setupAgentLandService(t *testing.T, ctx context.Context, graft config.Graft
 
 	testcfg.BuildGitalySSH(t, cfg)
 	testcfg.BuildGitalyHooks(t, cfg)
-	cfg.SocketPath = runOperationServiceServerWithLanes(t, cfg, lanes,
+	cfg.SocketPath = runOperationServiceServerWithLanes(t, cfg, lanes, append([]testserver.GitalyServerOpt{
 		testserver.WithInterceptors(agentInterceptors),
-		testserver.WithGitLabClient(gitlab.NewStandaloneClient(graft, testhelper.NewLogger(t))),
-	)
+		testserver.WithGraftPolicy(policy),
+		testserver.WithGitLabClient(gitlab.NewStandaloneClientWithPolicy(policy, testhelper.NewLogger(t))),
+	}, options...)...)
 	client, conn := newOperationClient(t, cfg.SocketPath)
 	t.Cleanup(func() { conn.Close() })
 	ctx = testhelper.MergeOutgoingMetadata(ctx, testcfg.GitalyServersMetadataFromCfg(t, cfg))
