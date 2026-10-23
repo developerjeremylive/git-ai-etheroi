@@ -15,6 +15,10 @@ import (
 // (doc/graft/PLAN12.md, section 4).
 var policyReloadSignal = syscall.SIGUSR1
 
+// reloaded runs after each reload that a signal caused, with its outcome. Tests replace it to wait
+// for the reload.
+var reloaded = func(policystore.Outcome) {}
+
 // reloadPolicyOnSignal reloads the policy of store from the configuration file at configPath every
 // time the process receives policyReloadSignal, one reload at a time. running is the [graft]
 // section the server started with. The returned function stops it.
@@ -26,7 +30,7 @@ func reloadPolicyOnSignal(logger log.Logger, configPath string, running config.G
 	go func() {
 		defer close(done)
 		for range signals {
-			reloadPolicy(logger, configPath, running, store)
+			reloaded(reloadPolicy(logger, configPath, running, store))
 		}
 	}()
 
