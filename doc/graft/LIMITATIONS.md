@@ -62,7 +62,10 @@ reference-transaction hook.
 
 Agents never create, update or delete a reference under `refs/graft/`, whatever
 the policy says: that namespace is the server's (land proposals, graft-verify's
-references), and the reference-transaction hook refuses it.
+references). A push of it is refused by `git-receive-pack`, which hides the
+namespace from agents; `UserMergeToRef` and `UserRebaseToRef` refuse it before
+they write; and the reference-transaction hook refuses it as the last layer.
+See [AGENT-SECURITY](AGENT-SECURITY.md).
 
 The policy governs the references under `refs/` and the `HEAD` symbolic
 reference, so an agent cannot repoint `HEAD` to get around a protected branch.
