@@ -6,7 +6,7 @@
 # Usage: examples/graft/quickstart.sh [WORKDIR]
 # Requires: the Gitaly build dependencies (Go, make, and what the bundled Git
 # needs to compile, see "Installation" in the Gitaly part of README.md),
-# openssl, git, and curl (optional, for the cache statistics).
+# openssl, and curl (optional, for the cache statistics).
 # WORKDIR defaults to a fresh temporary directory.
 #
 # The steps mirror doc/graft/QUICKSTART.md. The script assumes a Git checkout
@@ -65,19 +65,14 @@ log "Starting Gitaly in standalone mode"
 gitaly_pid=$!
 wait_for_socket "$work/run/gitaly.sock"
 
-log "Creating the demo repository with a seed commit on main and feature/demo"
-# There is no create command yet, so the repository is made on disk and seeded
-# with a plain push. Gitaly finds it by its relative path, demo.git.
-git init -q --bare "$work/repos/demo.git"
-git init -q "$work/seed"
-(
-  cd "$work/seed"
-  git symbolic-ref HEAD refs/heads/main
-  printf 'seed\n' > README.md
-  git add README.md
-  git -c user.name=seed -c user.email=seed@example.com commit -qm "Seed"
-  git push -q "$work/repos/demo.git" HEAD:refs/heads/main HEAD:refs/heads/feature/demo
-)
+log "Creating the demo repository with an initial commit on main and feature/demo"
+# Creating a repository is an operator action: it needs the shared token of
+# [auth] in the configuration. The initial commit passes the policy as
+# GRAFT_USER, here planner, who may write main.
+shared_token="$(sed -n 's/^token = "\(.*\)"$/\1/p' "$work/config.toml")"
+GRAFT_ADDRESS="unix:$work/run/gitaly.sock" GRAFT_STORAGE=default \
+  GRAFT_TOKEN="$shared_token" GRAFT_USER=planner GRAFT_AUTHOR="planner <planner@example.com>" \
+  "$work/bin/graft" repo create demo.git --initial-commit --branch feature/demo
 
 log "Starting the graft-cache daemon tier"
 "$work/bin/graft-cache" \

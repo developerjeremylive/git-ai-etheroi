@@ -99,6 +99,7 @@ func commandTable() map[string]command {
 		"search":  newSearchCommand(),
 		"review":  reviewCommand(),
 		"storage": storageCommand(),
+		"repo":    repoCommand(),
 	}
 }
 
@@ -273,6 +274,8 @@ commands:
   search QUERY           search file contents (--regex, -i, --path, --context, -n, --rev, --json)
   review SUBCOMMAND      create, show, list, comment, approve, request-changes, update, close (--branch, --title, --json)
   storage SUBCOMMAND     import, state, verify, checkpoint, gc a repository in the storage core; gc --removed for a storage (--connectivity, --dry-run, --json)
+  repo create REPO       create a repository, with the shared token (--default-branch, --object-format,
+                         --initial-commit [--branch NAME], --json)
 
 environment: GRAFT_ADDRESS, GRAFT_TOKEN, GRAFT_STORAGE, GRAFT_USER, GRAFT_AUTHOR
 

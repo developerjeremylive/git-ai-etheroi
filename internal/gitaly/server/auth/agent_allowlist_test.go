@@ -451,11 +451,14 @@ var sdkCLIDriftAllowance = map[string]string{}
 // rather than agent actions, with the gRPC service they may use outside the agent
 // allowlist. The storage core's administration (`graft storage import|state|verify`,
 // sdk/storage.go) runs with the server's shared token (doc/graft/STORAGE.md), so
-// agents are not meant to be allowed its RPCs. The scan checks these files
-// separately: every RPC they call must be agent-allowed or belong to the listed
-// service, and each file must still call that service (so an entry cannot go stale).
+// agents are not meant to be allowed its RPCs. So does the creation of a repository
+// (`graft repo create`, sdk/repository.go), which agents may never call. The scan
+// checks these files separately: every RPC they call must be agent-allowed or belong
+// to the listed service, and each file must still call that service (so an entry
+// cannot go stale).
 var operatorOnlySources = map[string]string{
-	"sdk/storage.go": "gitaly.StorageCoreService",
+	"sdk/storage.go":    "gitaly.StorageCoreService",
+	"sdk/repository.go": "gitaly.RepositoryService",
 }
 
 // sourceMethodCall matches a Go method call such as `refs.DeleteRefs(ctx, ...)`
