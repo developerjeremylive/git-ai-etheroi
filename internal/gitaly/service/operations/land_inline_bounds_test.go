@@ -120,19 +120,25 @@ func TestLandResolveInline_aBatchLosesAtMostItsBudget(t *testing.T) {
 	budget := &landInlineBudget{}
 	ctx := withLandInlineBudget(p.fx.ctx, budget)
 
-	start := time.Now()
+	// The calls are counted where the lane makes them, not in the log of the resolver, which a loaded machine
+	// writes only once its process has started, after the 300 ms may have cut the call.
+	var calls atomic.Int32
+	p.s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
+		calls.Add(1)
+		return context.WithTimeout(ctx, allowed)
+	}
+
 	for i := 0; i < members; i++ {
 		require.Equal(t, landInlineSlow, p.resolve(ctx, t, newLandPreResolution()), "member %d", i+1)
 	}
-	stalled := time.Since(start)
 
-	require.Equal(t, 1, inlineCalls(t, p.dir), "only the first member called: the others found the budget spent")
+	// One call, so the lane stalled once for it, not once per member (six at 300 ms would be 1.8 s).
+	require.EqualValues(t, 1, calls.Load(), "only the first member called: the others found the budget spent")
 	require.GreaterOrEqual(t, budget.lost, 250*time.Millisecond)
-	require.Less(t, stalled, 1500*time.Millisecond, "the lane stalled once for the call, not once per member")
 
 	// The next batch attempt has a budget of its own.
 	require.Equal(t, landInlineSlow, p.resolve(withLandInlineBudget(p.fx.ctx, &landInlineBudget{}), t, newLandPreResolution()))
-	require.Equal(t, 2, inlineCalls(t, p.dir))
+	require.EqualValues(t, 2, calls.Load())
 }
 
 // TestLandResolveInline_aBatchOfFastRulesIsNotCutShort: members that the rules resolve in milliseconds, against a
@@ -315,13 +321,49 @@ func TestUserLand_oneFailedInlineCallDoesNotStartAConvoy(t *testing.T) {
 	t.Parallel()
 
 	const lands = 8
-	q := newQueueFixtureMode(t, 2*lands, "slowonce", func(c *config.GraftResolver) { c.InlineTimeout = "300ms" })
+	var s *Server
+	operationServerHooks.Store(t.Name(), func(served *Server) { s = served })
+	// No clock cuts a call: the timeout is far longer than any call. The hiccup is cut by the test, the moment
+	// the resolver has started it (it has made its "slowed" marker): the calls in flight then are cancelled, and
+	// the hiccup is one of them, whichever call it is. (With a real 300 ms a loaded machine cut the calls that
+	// never hiccuped, which need that long to start a python process, and the lane handed those members back.)
+	q := newQueueFixtureMode(t, 2*lands, "slowonce", func(c *config.GraftResolver) { c.InlineTimeout = "30s" })
+	require.NotNil(t, s)
+	var mu sync.Mutex
+	var inflight []context.CancelFunc
+	s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
+		callCtx, cancel := context.WithTimeout(ctx, allowed)
+		mu.Lock()
+		defer mu.Unlock()
+		inflight = append(inflight, cancel)
+		return callCtx, cancel
+	}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for {
+			if _, err := os.Stat(filepath.Join(q.dir, "slowed")); err == nil {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, cancel := range inflight {
+					cancel()
+				}
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
 
 	for i, err := range q.landAll(q.onA[:lands]) {
 		require.NoError(t, err, "land %d of the first wave", i+1)
 	}
 	require.Empty(t, landTickets.keysOf(q.scope), "no ticket is kept after the hiccup")
 	outOfLane := unionCalls(t, q.dir) - inlineCalls(t, q.dir)
+	require.Positive(t, outOfLane, "the hiccup was handed back")
 	inline := inlineCalls(t, q.dir)
 
 	for i, err := range q.landAll(q.onA[lands:]) {

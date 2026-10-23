@@ -3,6 +3,7 @@ package operations
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/feder-cr/git-ai/internal/git/catfile"
 	"github.com/feder-cr/git-ai/internal/git/localrepo"
@@ -51,6 +52,8 @@ type Server struct {
 	// landLaneHook, when set, runs in the lane when it applies the verdicts of a land, holding the
 	// lane for as long as it runs; only tests set it, to keep a lane busy.
 	landLaneHook func()
+	// landInlineCallContext, when set, replaces context.WithTimeout for every inline call of the lane (land_inline.go); only tests set it.
+	landInlineCallContext func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc)
 	// landResolveHook, when set, runs in every resolver call while it holds its resolve slot; only
 	// tests set it.
 	landResolveHook func()

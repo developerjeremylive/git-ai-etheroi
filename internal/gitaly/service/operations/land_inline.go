@@ -149,7 +149,11 @@ func (s *Server) landResolveInline(ctx context.Context, in *gitalypb.UserLandReq
 		Capabilities: []string{resolver.CapabilityOrigin},
 		RulesOnly:    true,
 	}
-	callCtx, cancel := context.WithTimeout(ctx, allowed)
+	newCallContext := context.WithTimeout
+	if s.landInlineCallContext != nil {
+		newCallContext = s.landInlineCallContext
+	}
+	callCtx, cancel := newCallContext(ctx, allowed)
 	defer cancel()
 	start := time.Now()
 	resp, err := slot.Resolve(callCtx, req)
