@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/grpc/client"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/status"
 )
 
 // Repo represents a Git repository on a different Gitaly storage
@@ -108,24 +108,24 @@ func (rr *Repo) ResolveBranch(ctx context.Context, branch string) (git.ObjectID,
 // git.ErrReferenceNotFound when the reference does not exist (also when references below its name
 // do) or does not peel to a commit.
 func (rr *Repo) ResolveReference(ctx context.Context, name git.ReferenceName) (git.ObjectID, error) {
-	target, err := rr.referenceTarget(ctx, name)
+	commit, exists, err := rr.exactCommit(ctx, name)
 	if err != nil {
 		return "", err
 	}
-	if target == "" {
+	if !exists || commit == "" {
 		return "", git.ErrReferenceNotFound
 	}
-
-	// The object ID read above, peeled as `<name>^{commit}` is: an object ID is never
-	// resolved through a reference.
-	return rr.ResolveRevision(ctx, git.Revision(target)+"^{commit}")
+	return commit, nil
 }
 
+// ErrNotACommit is returned by ReadReference for a reference that exists but does not point to a
+// commit (another object, or an object that is missing).
+var ErrNotACommit = errors.New("the reference does not point to a commit")
+
 // ReadReference will dial to the remote repository and read the reference named name by its exact
-// name, to the commit it points to, or return git.ErrReferenceNotFound when it does not exist (a
-// dangling symbolic reference included) or does not peel to a commit. RefExists checks the exact
-// name (show-ref --verify, without listing the references below it), and only then FindCommit
-// resolves it, by the full name, which is the first name git's DWIM rules try. Of the root
+// name, to the commit it points to. It returns git.ErrReferenceNotFound when the reference does not
+// exist (a dangling symbolic reference included), and ErrNotACommit when it exists but does not
+// point to a commit, as a local read of its value would then fail to peel it. Of the root
 // references, which RefExists does not take, only HEAD is read, by FindCommit: a dangling HEAD falls
 // through git's rules there.
 func (rr *Repo) ReadReference(ctx context.Context, name git.ReferenceName) (git.ObjectID, error) {
@@ -136,49 +136,47 @@ func (rr *Repo) ReadReference(ctx context.Context, name git.ReferenceName) (git.
 		return rr.ResolveRevision(ctx, name.Revision())
 	}
 
+	commit, exists, err := rr.exactCommit(ctx, name)
+	switch {
+	case err != nil:
+		return "", err
+	case !exists:
+		return "", git.ErrReferenceNotFound
+	case commit == "":
+		return "", fmt.Errorf("%q: %w", name, ErrNotACommit)
+	}
+	return commit, nil
+}
+
+// exactCommit reads the reference named name by its exact name: exists tells whether it exists,
+// and commit is the commit it points to, empty when it points to another object or to one that is
+// missing. RefExists checks the exact name (show-ref --verify, without listing the references below
+// it; a dangling symbolic reference does not exist), and only then FindCommit resolves it, by the
+// full name, which is the first name git's DWIM rules try.
+func (rr *Repo) exactCommit(ctx context.Context, name git.ReferenceName) (commit git.ObjectID, exists bool, returnedErr error) {
 	resp, err := gitalypb.NewRefServiceClient(rr.conn).RefExists(ctx, &gitalypb.RefExistsRequest{
 		Repository: rr.Repository,
 		Ref:        []byte(name),
 	})
 	if err != nil {
-		return "", fmt.Errorf("ref exists: %w", err)
+		// A reference whose object is missing is answered with this detail; any other error,
+		// the detail missing included, is a failure.
+		for _, detail := range status.Convert(err).Details() {
+			if refErr, ok := detail.(*gitalypb.RefExistsError); ok && refErr.GetUnresolvableReference() != nil {
+				return "", true, nil
+			}
+		}
+		return "", false, fmt.Errorf("ref exists: %w", err)
 	}
 	if !resp.GetValue() {
-		return "", git.ErrReferenceNotFound
+		return "", false, nil
 	}
 
-	return rr.ResolveRevision(ctx, name.Revision())
-}
-
-// referenceTarget returns the object ID that the reference named name points to, read by its exact
-// name with ListRefs, or an empty string when it does not exist (also when references below its
-// name do).
-func (rr *Repo) referenceTarget(ctx context.Context, name git.ReferenceName) (string, error) {
-	// ListRefs matches references below the pattern too: only the exact name counts.
-	stream, err := gitalypb.NewRefServiceClient(rr.conn).ListRefs(ctx, &gitalypb.ListRefsRequest{
-		Repository: rr.Repository,
-		Patterns:   [][]byte{[]byte(name)},
-	})
-	if err != nil {
-		return "", fmt.Errorf("list refs: %w", err)
+	commit, err = rr.ResolveRevision(ctx, name.Revision())
+	if errors.Is(err, git.ErrReferenceNotFound) {
+		return "", true, nil
 	}
-	var target string
-	for {
-		resp, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return "", fmt.Errorf("list refs: %w", err)
-		}
-		for _, ref := range resp.GetReferences() {
-			if git.ReferenceName(ref.GetName()) == name {
-				target = ref.GetTarget()
-			}
-		}
-	}
-
-	return target, nil
+	return commit, true, err
 }
 
 // HasBranches will dial to the remote repository and check whether the repository has any branches.

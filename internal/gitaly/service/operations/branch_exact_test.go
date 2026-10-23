@@ -904,6 +904,83 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 	})
 }
 
+// TestStartBranchLocalAndRemoteAgree runs the same start points in the repository of the request
+// and through a start repository, the same repository read over RPC: a reference that exists but
+// does not point to a commit fails the request on both paths, with the same code, instead of being
+// skipped for a later reference on one of them.
+func TestStartBranchLocalAndRemoteAgree(t *testing.T) {
+	t.Parallel()
+
+	ctx, cfg, client := setupExactBranchService(t)
+
+	for _, tc := range []struct {
+		desc string
+		// refs writes the references of the case and returns the parent the cherry-pick must have,
+		// empty when it must fail.
+		refs func(t *testing.T, setup cherryPickOrRevertSetup) string
+	}{
+		{
+			desc: "a branch",
+			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/heads/x", setup.base)
+				return setup.base.String()
+			},
+		},
+		{
+			desc: "a tag at a tree, before a remote-tracking branch",
+			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
+				tree := strings.TrimSpace(string(gittest.Exec(t, cfg, "-C", setup.repoPath, "rev-parse", setup.base.String()+"^{tree}")))
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/tags/x", git.ObjectID(tree))
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/remotes/x", setup.base)
+				return ""
+			},
+		},
+		{
+			desc: "a branch at a missing object",
+			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
+				doomed := gittest.WriteCommit(t, cfg, setup.repoPath, gittest.WithMessage("doomed"))
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/heads/x", doomed)
+				require.NoError(t, os.Remove(filepath.Join(setup.repoPath, "objects", doomed.String()[:2], doomed.String()[2:])))
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/remotes/x", setup.base)
+				return ""
+			},
+		},
+	} {
+		for _, remote := range []bool{false, true} {
+			desc := tc.desc + ", local"
+			if remote {
+				desc = tc.desc + ", through a start repository"
+			}
+			t.Run(desc, func(t *testing.T) {
+				t.Parallel()
+
+				setup := setupCherryPickOrRevert(t, ctx, cfg)
+				parent := tc.refs(t, setup)
+				request := &gitalypb.UserCherryPickRequest{
+					Repository:      setup.repo,
+					User:            gittest.TestUser,
+					Commit:          setup.commit,
+					BranchName:      []byte("new"),
+					StartBranchName: []byte("x"),
+					Message:         []byte("cherry-pick onto new"),
+				}
+				if remote {
+					request.StartRepository = setup.repo
+				}
+
+				resp, err := client.UserCherryPick(ctx, request)
+				if parent == "" {
+					testhelper.RequireGrpcCode(t, err, codes.InvalidArgument)
+					require.ErrorContains(t, err, "resolve start ref")
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, parent, parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
+			})
+		}
+	}
+}
+
 // TestResolveStartBranch checks the rule of resolveStartBranch over a fake repository: git's
 // resolution, but an existing branch of the exact name beats a reference with the same name
 // (refs/tags/x, refs/x), unless the name starts with a namespace git prefixes. read answers v(ref)
@@ -947,7 +1024,16 @@ func TestResolveStartBranch(t *testing.T) {
 		{name: "origin", refs: []string{"refs/remotes/origin/HEAD"}, expected: "v(refs/remotes/origin/HEAD)^{commit}"},
 		// The suffix applies to the value read.
 		{name: "main~1", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "v(refs/heads/main)~1^{commit}"},
-		{name: "main:file", refs: []string{"refs/heads/main"}, expected: "v(refs/heads/main):file^{commit}"},
+		// A path is not a start point; a colon inside braces is not a path.
+		{name: "main:file", refs: []string{"refs/heads/main"}, expected: "path"},
+		{name: ":path", expected: "path", noLookup: true},
+		{name: "main^{/fix: x}", refs: []string{"refs/heads/main"}, expected: "v(refs/heads/main)^{/fix: x}^{commit}"},
+		{
+			name:     "main@{2024-01-01 10:00:00}",
+			refs:     []string{"refs/heads/main"},
+			reflogs:  []string{"refs/heads/main"},
+			expected: "refs/heads/main@{2024-01-01 10:00:00}^{commit}",
+		},
 		{name: "refs/tags/v1^{}", refs: []string{"refs/tags/v1"}, expected: "v(refs/tags/v1)^{}^{commit}"},
 		// A reflog suffix needs the name, which is read again afterwards, and a reflog of the
 		// reference's own: without one, git would read the reflog of a decoy.
@@ -971,7 +1057,6 @@ func TestResolveStartBranch(t *testing.T) {
 		{name: strings.ToUpper(sha), refs: []string{"refs/heads/" + strings.ToUpper(sha)}, expected: strings.ToUpper(sha) + "^{commit}", noLookup: true},
 		{name: sha + "~0", refs: []string{"refs/heads/" + sha}, expected: sha + "~0^{commit}", noLookup: true},
 		{name: "@{-1}", expected: "@{-1}^{commit}", noLookup: true},
-		{name: ":path", expected: ":path^{commit}", noLookup: true},
 		{name: "~1", expected: "~1^{commit}", noLookup: true},
 	} {
 		t.Run(tc.name+" with "+strings.Join(tc.refs, ","), func(t *testing.T) {
@@ -1001,9 +1086,12 @@ func TestResolveStartBranch(t *testing.T) {
 			}
 
 			resolved, err := resolveStartBranch(tc.name, git.ObjectHashSHA1, read, reflogExists, resolve)
-			if tc.expected == "not found" {
+			switch tc.expected {
+			case "not found":
 				require.ErrorIs(t, err, git.ErrReferenceNotFound)
-			} else {
+			case "path":
+				require.ErrorIs(t, err, errStartPointPath)
+			default:
 				require.NoError(t, err)
 				require.Equal(t, tc.expected, resolved.String())
 			}

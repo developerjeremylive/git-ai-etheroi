@@ -240,7 +240,12 @@ func resolveStartBranch(
 	resolve func(git.Revision) (git.ObjectID, error),
 ) (git.ObjectID, error) {
 	base, suffix := splitRevisionSuffix(name)
-	// A revision that starts with its suffix (@{-1}, :path) names no reference.
+	// A start point is a commit, and <revision>:path names a blob or a tree; git would parse a
+	// ^{commit} after it as part of the path.
+	if namesPath(suffix) {
+		return "", errStartPointPath
+	}
+	// A revision that starts with its suffix (@{-1}) names no reference.
 	if base == "" || isFullObjectID(base, objectHash) {
 		return resolve(git.Revision(name + "^{commit}"))
 	}
@@ -272,6 +277,30 @@ func resolveStartBranch(
 		return "", fmt.Errorf("reference %q: %w", reference, errStartReferenceChanged)
 	}
 	return commit, nil
+}
+
+// errStartPointPath is the error of a start point that names a path (<revision>:path), not a commit.
+var errStartPointPath = errors.New("the start point names a path, not a commit")
+
+// namesPath reports whether the suffix of a revision names a path: a colon outside braces, where
+// @{<date>} and ^{/<text>} may hold one.
+func namesPath(suffix string) bool {
+	depth := 0
+	for _, c := range suffix {
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		case ':':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // errStartReferenceChanged is the error of a start reference that changed while its reflog was read.

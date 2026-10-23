@@ -139,4 +139,27 @@ func TestUserCommitFilesResolvesStartRepositoryBranchesExactly(t *testing.T) {
 			})
 		}
 	}
+
+	t.Run("a start branch with branches below its name", func(t *testing.T) {
+		// refs/heads/x/y is below the name x, which a listing by prefix would match: x itself does
+		// not exist.
+		repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
+		gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("master"))
+
+		startRepo, startRepoPath := gittest.CreateRepository(t, ctx, cfg)
+		gittest.WriteCommit(t, cfg, startRepoPath, gittest.WithBranch("main"))
+		gittest.WriteCommit(t, cfg, startRepoPath, gittest.WithBranch("x/y"))
+
+		header := headerRequest(repo, gittest.TestUser, "new", []byte("message"), "x", "")
+		setStartRepository(header, startRepo)
+
+		stream, err := client.UserCommitFiles(ctx)
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(header))
+		require.NoError(t, stream.Send(createFileHeaderRequest("file")))
+		require.NoError(t, stream.Send(actionContentRequest("content\n")))
+		_, err = stream.CloseAndRecv()
+		require.ErrorContains(t, err, "reference not found")
+		require.NotContains(t, string(gittest.Exec(t, cfg, "-C", repoPath, "for-each-ref", "refs/heads/")), "refs/heads/new")
+	})
 }
