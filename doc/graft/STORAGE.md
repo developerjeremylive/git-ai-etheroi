@@ -931,6 +931,61 @@ Where to put a file bucket: on a different device from the database and from
 the repositories, so that its fsyncs do not queue behind theirs. An
 object-store bucket has no local fsync; it was not measured here.
 
+### Inline compaction stays
+
+Git compacts a repository's reftable stack inline: every reference update that
+leaves the stack out of its geometric shape merges tables before it releases
+the repository's lock, and Gitaly sets no `reftable.autoCompaction`. Measured
+on 2026-10-23, to decide whether that compaction should move out of the write
+path, to housekeeping.
+
+Setup:
+- The bundled Git with the options Gitaly passes: `core.fsyncMethod=fsync`,
+  `reftable.lockTimeout=10000`, and `core.fsync` without `reference` (the
+  deferred durability of authoritative mode) or with it (off and shadow mode).
+- A fresh reftable repository per run: 1000 branches in one table, and one
+  branch per writer. 1, 10 or 50 writers, each updating its own branch 40
+  times, one `git update-ref --stdin` transaction (start, update with its old
+  value, prepare, commit) per update, as Gitaly runs them.
+- Two modes: as shipped, and with compaction off
+  (`GIT_TEST_REFTABLE_AUTOCOMPACTION=false`), the upper bound of moving it out
+  of the write path. After the writers, the reads of the final stack (median of
+  21 runs): `show-ref --verify` of one branch, `for-each-ref` of one branch and
+  of every reference; with compaction off, also the `git pack-refs --auto` that
+  housekeeping would run next.
+- Four series of each mode, alternating, run only on an idle machine (CPU
+  pressure at most 0.51, at least 98.6% idle, before and after every series).
+  The numbers are the median of the four series.
+
+Deferred durability (authoritative mode), in ms:
+
+| writers | compaction | update mean (range) | update p99 | tables after | read: verify / one / all | pack-refs |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | inline | 6.4 (5.7–6.8) | 9.8 | 2 | 4.5 / 3.0 / 12.2 | |
+| 1 | off | 8.2 (5.8–12.4) | 15.8 | 41 | 3.4 / 4.5 / 14.2 | 6.9 |
+| 10 | inline | 13.3 (9.8–18.2) | 97.9 | 3 | 5.5 / 3.9 / 14.7 | |
+| 10 | off | 11.6 (10.8–12.0) | 61.4 | 401 | 6.3 / 6.7 / 17.9 | 22.8 |
+| 50 | inline | 37.5 (36.6–49.9) | 455.6 | 4 | 6.1 / 6.0 / 15.1 | |
+| 50 | off | 98.5 (97.0–105.4) | 1447.9 | 2001 | 23.8 / 23.1 / 36.5 | 137.0 |
+
+What this shows:
+- **Compaction keeps writes and reads cheap.** With compaction inline the
+  stack stays at 2–4 tables. Without it, it grows by one table per update, to
+  2001 with 50 writers: every update and every read then loads a longer stack,
+  so at 50 writers the updates are 2.6× slower in the mean and 3× in the p99,
+  the reads 4× slower, and housekeeping inherits a `pack-refs` of 137 ms. At
+  10 writers turning compaction off saves 1.8 ms in the mean, below the 10 ms
+  we require. Not built.
+- **In off and shadow mode the cost is the fsync of every update.** With
+  `reference` in `core.fsync`, turning compaction off lowers the update mean
+  (from 23.9 to 16.7 ms with one writer, from 135 to 84 ms with 10, from 643 to
+  437 ms with 50: a compaction there writes and fsyncs one more table under the
+  lock). But the p99 stays at 1.4–1.5 s with 10 writers and 6.4–7.8 s with 50
+  in both modes, and at 50 writers 26 (inline) and 63 (off) of 2000 updates per
+  series ran out of `reftable.lockTimeout` ("cannot lock references"). The
+  updates queue on the repository's lock behind one fsync each; fewer fsyncs
+  per update, not less compaction, is what would shorten that queue.
+
 ## Limits
 
 - **Git still needs a local repository.** "Stateless" means that the local
