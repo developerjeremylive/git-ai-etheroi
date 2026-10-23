@@ -23,6 +23,12 @@ func IsNotFound(err error) bool {
 	return Code(err) == codes.NotFound
 }
 
+// IsAlreadyExists reports whether err is an AlreadyExists error, for example
+// Create of a repository that exists already.
+func IsAlreadyExists(err error) bool {
+	return Code(err) == codes.AlreadyExists
+}
+
 // LandError returns the structured details of a failed Land call, if any.
 func LandError(err error) (*gitalypb.UserLandError, bool) {
 	return detailOf[*gitalypb.UserLandError](err)

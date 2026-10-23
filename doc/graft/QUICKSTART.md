@@ -62,22 +62,25 @@ access check is answered from the policy.
 
 ## 4. Create a repository
 
-There is no create command yet. A repository is a bare Git repository under the
-storage path, found by its relative path. Give it a first commit, because a
-clone needs an existing branch:
+Creating a repository is an operator action: it needs the shared token of the
+`[auth]` section, and an agent token is refused. `--initial-commit` gives the
+repository a first commit (a `README.md`) on its default branch, `main`,
+because a clone needs an existing branch:
 
 ```shell
-git init --bare /var/lib/graft/repos/demo.git
-git init seed && cd seed
-git symbolic-ref HEAD refs/heads/main
-printf 'seed\n' > README.md
-git add README.md
-git -c user.name=seed -c user.email=seed@example.com commit -m "Seed"
-git push /var/lib/graft/repos/demo.git HEAD:refs/heads/main HEAD:refs/heads/feature/demo
-cd ..
+GRAFT_ADDRESS=unix:/var/lib/graft/run/gitaly.sock \
+GRAFT_TOKEN=change-me-shared-token \
+GRAFT_USER=planner \
+GRAFT_AUTHOR="planner <planner@example.com>" \
+graft repo create demo.git --initial-commit --branch feature/demo
 ```
 
-The seed also creates `feature/demo`, which the builder lands on below.
+The initial commit passes the policy like any write, as the user of
+`GRAFT_USER`: here `planner`, who may write `main`. `--branch feature/demo`
+also creates `feature/demo` at the initial commit, which the builder lands on
+below. The command converges on the state it asks for: if it fails part way,
+run it again, and it does only what is left (`graft repo create -h` has the
+rules).
 
 ## 5. Start the cache daemon
 

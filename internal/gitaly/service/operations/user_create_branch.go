@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/feder-cr/git-ai/internal/git"
+	"github.com/feder-cr/git-ai/internal/gitaly/hook"
 	"github.com/feder-cr/git-ai/internal/gitaly/hook/updateref"
 	"github.com/feder-cr/git-ai/internal/gitaly/storage"
 	"github.com/feder-cr/git-ai/internal/structerr"
@@ -66,6 +67,14 @@ func (s *Server) UserCreateBranch(ctx context.Context, req *gitalypb.UserCreateB
 
 	if err := s.updateReferenceWithHooks(ctx, req.GetRepository(), req.GetUser(), quarantineDir, referenceName, startPointOID, objectHash.ZeroOID); err != nil {
 		var customHookErr updateref.CustomHookError
+		var notAllowedError hook.NotAllowedError
+
+		// An access check that refuses the update (the standalone policy, or GitLab)
+		// is a denial, as in UserDeleteBranch, not an internal error.
+		// UserCreateBranchError has no access check detail.
+		if errors.As(err, &notAllowedError) {
+			return nil, structerr.NewPermissionDenied("creation denied by access checks: %w", err)
+		}
 
 		if errors.As(err, &customHookErr) {
 			return nil, structerr.NewPermissionDenied("creation denied by custom hooks: %w", err).WithDetail(

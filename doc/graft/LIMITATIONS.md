@@ -134,12 +134,11 @@ Git hooks use private.
 
 ### Repositories
 
-- The `graft` CLI and the SDK cannot create a repository. The upstream
-  `RepositoryService.CreateRepository` RPC works, but needs a raw gRPC client
-  and the shared token (agents may not call it). `graft-bench --create-repo`
-  does this. The quickstart creates a bare repository on disk and seeds it
-  with a push.
-- `graft clone` needs the branch to exist. An empty repository cannot be cloned.
+- Creating a repository (`graft repo create`, `Repo.Create` in the SDK) needs
+  the shared token: agents may not create repositories. In shadow mode the new
+  repository is not tracked until `graft storage import`.
+- `graft clone` needs the branch to exist. An empty repository cannot be cloned:
+  `graft repo create --initial-commit` gives it a first commit.
 - Durability of written objects assumes a local journaling filesystem, ext4 (in
   any `data=` mode) or xfs, not NFS. The objects of a write are made durable by
   their writer, and the migration of the write's quarantine into the repository
@@ -315,21 +314,19 @@ Git hooks use private.
 Ordered roughly by the order we intend to work on them. None of this is a
 commitment.
 
-1. Repository creation in the SDK and the CLI, so that the quickstart no longer
-   creates repositories on disk.
-2. Live policy reload, with a file watch or a signal, and a dry-run mode that
+1. Live policy reload, with a file watch or a signal, and a dry-run mode that
    reports what a policy change would allow.
-3. Eager derived data for `lastmod` and blame when a change lands, with metrics
+2. Eager derived data for `lastmod` and blame when a change lands, with metrics
    for hit rates. Phase 3 computes `graph` and `changed-paths` eagerly.
-4. Changeset log retention and an index by sequence, so long logs can be
+3. Changeset log retention and an index by sequence, so long logs can be
    followed without a sequential read.
-5. Client-side help for the conflicts that the server's resolver does not
+4. Client-side help for the conflicts that the server's resolver does not
    handle: the `merge_conflict` error already lists the conflicting files and
    commits, but the CLI cannot yet materialize them in the workspace for an
    agent to fix (phase 2 added server-side resolution, see
    [RESOLVE](RESOLVE.md)).
-6. Multi-node cache tiers with explicit invalidation for mutable keys.
-7. Signed changesets and a verifiable export of the log.
+5. Multi-node cache tiers with explicit invalidation for mutable keys.
+6. Signed changesets and a verifiable export of the log.
 
 ## Phase 4b limitations
 

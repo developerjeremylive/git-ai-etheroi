@@ -190,6 +190,12 @@ func Create(
 	// vote.
 	unlock, err := Lock(ctx, logger, locator, repository)
 	if err != nil {
+		// Another request is creating or removing the repository (or one left a
+		// stale lock): a conflict of the caller, as in Remove, not an internal
+		// error.
+		if errors.Is(err, safe.ErrFileAlreadyLocked) {
+			return structerr.NewFailedPrecondition("repository is already locked")
+		}
 		return fmt.Errorf("locking repository: %w", err)
 	}
 	defer unlock()

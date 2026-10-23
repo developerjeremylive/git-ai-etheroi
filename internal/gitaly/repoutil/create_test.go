@@ -23,7 +23,6 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/storage/mode"
 	"github.com/feder-cr/git-ai/internal/gitaly/transaction"
 	"github.com/feder-cr/git-ai/internal/helper/text"
-	"github.com/feder-cr/git-ai/internal/safe"
 	"github.com/feder-cr/git-ai/internal/structerr"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
@@ -209,7 +208,7 @@ func TestCreate(t *testing.T) {
 
 				requireFullRepackTimestampExists(t, realRepoPath, false)
 			},
-			requireError: equalError(fmt.Errorf("locking repository: %w", safe.ErrFileAlreadyLocked)),
+			requireError: equalError(structerr.NewFailedPrecondition("repository is already locked")),
 		},
 		{
 			desc:          "successful transaction",
@@ -290,7 +289,7 @@ func TestCreate(t *testing.T) {
 				require.NoDirExists(t, tempRepoPath)
 				require.NoDirExists(t, realRepoPath)
 			},
-			requireError: equalError(fmt.Errorf("locking repository: %w", errors.New("file already locked"))),
+			requireError: equalError(structerr.NewFailedPrecondition("repository is already locked")),
 		},
 		func() setup {
 			var votingRepo *localrepo.Repo

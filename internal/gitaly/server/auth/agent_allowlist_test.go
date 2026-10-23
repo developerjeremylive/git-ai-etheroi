@@ -448,14 +448,32 @@ func TestAgentAllowlist_ConcurrentDecisions(t *testing.T) {
 var sdkCLIDriftAllowance = map[string]string{}
 
 // operatorOnlySources lists the SDK and CLI files whose calls are operator actions
-// rather than agent actions, with the gRPC service they may use outside the agent
-// allowlist. The storage core's administration (`graft storage import|state|verify`,
-// sdk/storage.go) runs with the server's shared token (doc/graft/STORAGE.md), so
-// agents are not meant to be allowed its RPCs. The scan checks these files
-// separately: every RPC they call must be agent-allowed or belong to the listed
-// service, and each file must still call that service (so an entry cannot go stale).
-var operatorOnlySources = map[string]string{
-	"sdk/storage.go": "gitaly.StorageCoreService",
+// rather than agent actions, with the RPCs they may call outside the agent
+// allowlist: a whole gRPC service ("gitaly.StorageCoreService") or one method
+// ("gitaly.RepositoryService/CreateRepository"). The storage core's administration
+// (`graft storage import|state|verify`, sdk/storage.go) runs with the server's shared
+// token (doc/graft/STORAGE.md), so agents are not meant to be allowed its RPCs. So
+// does the creation of a repository (`graft repo create`, sdk/repository.go): agents
+// may never create one, and its exact checks read the object format and whether a
+// reference exists. The scan checks these files separately: every RPC they call must
+// be agent-allowed or listed here, and each entry must still be called (so an entry
+// cannot go stale).
+var operatorOnlySources = map[string][]string{
+	"sdk/storage.go": {"gitaly.StorageCoreService"},
+	"sdk/repository.go": {
+		"gitaly.RepositoryService/CreateRepository",
+		"gitaly.RepositoryService/ObjectFormat",
+		"gitaly.RefService/RefExists",
+	},
+}
+
+// operatorScopeCovers reports whether fullMethod is the method, or a method of the
+// service, that scope names in operatorOnlySources.
+func operatorScopeCovers(scope, fullMethod string) bool {
+	if strings.Contains(scope, "/") {
+		return fullMethod == "/"+scope
+	}
+	return strings.HasPrefix(fullMethod, "/"+scope+"/")
 }
 
 // sourceMethodCall matches a Go method call such as `refs.DeleteRefs(ctx, ...)`
@@ -489,19 +507,26 @@ func TestAgentAllowlist_SourceScanMatchesSDKAndCLI(t *testing.T) {
 		methodsByName[name] = append(methodsByName[name], fullMethod)
 	}
 
-	for file, service := range operatorOnlySources {
-		usesService := false
+	for file, scopes := range operatorOnlySources {
+		used := map[string]bool{}
 		for name := range operatorCalls[file] {
 			for _, fullMethod := range methodsByName[name] {
-				if strings.HasPrefix(fullMethod, "/"+service+"/") {
-					usesService = true
+				covered := false
+				for _, scope := range scopes {
+					if operatorScopeCovers(scope, fullMethod) {
+						used[scope], covered = true, true
+					}
+				}
+				if covered {
 					continue
 				}
 				require.True(t, allowlist.mayCall(fullMethod),
-					"%s is an operator-only source for %s but also calls %s, which agents may not call", file, service, fullMethod)
+					"%s is an operator-only source for %v but also calls %s, which agents may not call", file, scopes, fullMethod)
 			}
 		}
-		require.True(t, usesService, "%s is in operatorOnlySources but no longer calls %s; remove the entry", file, service)
+		for _, scope := range scopes {
+			require.True(t, used[scope], "%s is in operatorOnlySources for %s but no longer calls it; remove the entry", file, scope)
+		}
 	}
 
 	var denied []string
