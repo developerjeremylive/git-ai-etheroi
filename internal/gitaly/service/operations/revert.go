@@ -226,6 +226,11 @@ func (s *Server) UserRevert(ctx context.Context, req *gitalypb.UserRevertRequest
 // start point, as before. A full reference name (refs/...) is read exactly as given, with no
 // fallback: a missing refs/heads/x does not resolve through refs/refs/heads/x or another decoy.
 //
+// A start point is a commit, never a path: <revision>:path is refused, and so is :/<text>, a search
+// of the commit messages, by choice, as a start point that depends on which message matches is
+// fragile. Through a start repository, FindCommit refuses revisions that hold whitespace or a colon,
+// so main@{2024-01-01 10:00:00} or main^{/fix: x} work locally only.
+//
 // The chosen reference is read once, to its value, and the suffix applies to that object ID: no
 // rule resolves the name again, so a reference that is dangling, or that goes away meanwhile, never
 // yields a decoy. A reflog suffix (@{n}) needs the name: the reference must have a reflog of its
@@ -341,19 +346,19 @@ func startReference(name string, read func(git.ReferenceName) (git.ObjectID, err
 		if errors.Is(err, git.ErrReferenceNotFound) {
 			continue
 		}
-		if err != nil {
+		// A reference that does not point to a commit exists all the same, as it does when its
+		// value is read locally: the branch may still beat it, and it fails the request only
+		// when it is the reference chosen.
+		if err != nil && !errors.Is(err, remoterepo.ErrNotACommit) {
 			return "", "", err
 		}
 		if !namesNamespace && (candidate == other || candidate == tag) {
-			branchValue, err := read(branch)
-			if err == nil {
-				return branch, branchValue, nil
-			}
-			if !errors.Is(err, git.ErrReferenceNotFound) {
-				return "", "", err
+			branchValue, branchErr := read(branch)
+			if !errors.Is(branchErr, git.ErrReferenceNotFound) {
+				return branch, branchValue, branchErr
 			}
 		}
-		return candidate, value, nil
+		return candidate, value, err
 	}
 	return "", "", nil
 }

@@ -927,6 +927,15 @@ func TestStartBranchLocalAndRemoteAgree(t *testing.T) {
 			},
 		},
 		{
+			desc: "a branch and a tag of its name at a tree",
+			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
+				tree := strings.TrimSpace(string(gittest.Exec(t, cfg, "-C", setup.repoPath, "rev-parse", setup.base.String()+"^{tree}")))
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/tags/x", git.ObjectID(tree))
+				gittest.WriteRef(t, cfg, setup.repoPath, "refs/heads/x", setup.base)
+				return setup.base.String()
+			},
+		},
+		{
 			desc: "a tag at a tree, before a remote-tracking branch",
 			refs: func(t *testing.T, setup cherryPickOrRevertSetup) string {
 				tree := strings.TrimSpace(string(gittest.Exec(t, cfg, "-C", setup.repoPath, "rev-parse", setup.base.String()+"^{tree}")))
@@ -1027,6 +1036,8 @@ func TestResolveStartBranch(t *testing.T) {
 		// A path is not a start point; a colon inside braces is not a path.
 		{name: "main:file", refs: []string{"refs/heads/main"}, expected: "path"},
 		{name: ":path", expected: "path", noLookup: true},
+		// A search of the commit messages is refused too, by choice.
+		{name: ":/fix the bug", expected: "path", noLookup: true},
 		{name: "main^{/fix: x}", refs: []string{"refs/heads/main"}, expected: "v(refs/heads/main)^{/fix: x}^{commit}"},
 		{
 			name:     "main@{2024-01-01 10:00:00}",
