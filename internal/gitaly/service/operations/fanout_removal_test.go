@@ -99,3 +99,40 @@ index 3742e48..e40a3b9 100644
 	require.Equal(t, []byte("changed\n"), gittest.Exec(t, cfg, "-C", repoPath, "show", git.DefaultBranch+":file"))
 	gittest.Exec(t, cfg, "-C", repoPath, "fsck", "--strict")
 }
+
+func TestUserMergeToRef_fanOutDirectoryRemoved(t *testing.T) {
+	t.Parallel()
+
+	ctx, cfg, client := setupFanOutRemoval(t)
+
+	repoProto, repoPath := gittest.CreateRepository(t, ctx, cfg)
+	base := gittest.WriteCommit(t, cfg, repoPath, gittest.WithTreeEntries(
+		gittest.TreeEntry{Path: "base", Mode: "100644", Content: "base\n"},
+	))
+	ours := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch(git.DefaultBranch), gittest.WithParents(base), gittest.WithTreeEntries(
+		gittest.TreeEntry{Path: "base", Mode: "100644", Content: "base\n"},
+		gittest.TreeEntry{Path: "ours", Mode: "100644", Content: "ours\n"},
+	))
+	theirs := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("theirs"), gittest.WithParents(base), gittest.WithTreeEntries(
+		gittest.TreeEntry{Path: "base", Mode: "100644", Content: "base\n"},
+		gittest.TreeEntry{Path: "theirs", Mode: "100644", Content: "theirs\n"},
+	))
+	packWithoutFanOut(t, cfg, repoPath)
+
+	response, err := client.UserMergeToRef(ctx, &gitalypb.UserMergeToRefRequest{
+		Repository:     repoProto,
+		User:           gittest.TestUser,
+		FirstParentRef: []byte("refs/heads/" + git.DefaultBranch),
+		TargetRef:      []byte("refs/merge-requests/1/merge"),
+		SourceSha:      theirs.String(),
+		Message:        []byte("merge"),
+	})
+	require.NoError(t, err)
+
+	repo := localrepo.NewTestRepo(t, cfg, repoProto)
+	merged, err := repo.ReadCommit(ctx, git.Revision("refs/merge-requests/1/merge"))
+	require.NoError(t, err)
+	require.Equal(t, response.GetCommitId(), merged.GetId())
+	require.Equal(t, []string{ours.String(), theirs.String()}, merged.GetParentIds())
+	gittest.Exec(t, cfg, "-C", repoPath, "fsck", "--strict")
+}
