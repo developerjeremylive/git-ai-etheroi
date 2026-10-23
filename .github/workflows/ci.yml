@@ -87,7 +87,26 @@ jobs:
           mkdir -p "$RUNNER_TEMP/testpath"
           ln -s "$PWD/_build/bin/git-filter-repo" "$RUNNER_TEMP/testpath/git-filter-repo"
           export PATH="$RUNNER_TEMP/testpath:$PATH"
-          make test-go TEST_PACKAGES="$(echo $pkgs)"
+          make test-go TEST_PACKAGES="$(echo $pkgs)" \
+            TEST_JSON_REPORT="$RUNNER_TEMP/tests.json" TEST_RERUN_REPORT="$RUNNER_TEMP/reruns.txt"
+
+      # gotestsum re-runs failed tests; one that then passes leaves the job
+      # green. List the re-run tests on the run page and keep the output of
+      # every attempt as an artifact.
+      - name: Re-run report
+        id: reruns
+        if: always()
+        run: bash .github/scripts/rerun-report.sh "$RUNNER_TEMP/reruns.txt" "test (${{ matrix.group }})"
+
+      - name: Upload the test output of re-run tests
+        if: always() && steps.reruns.outputs.reruns == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-json-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/tests.json
+            ${{ runner.temp }}/reruns.txt
+          retention-days: 14
 
   # The Git, service and storage packages again with the reftable reference
   # backend (GITALY_TEST_REF_FORMAT=reftable, set by make test-with-reftable),
@@ -144,7 +163,24 @@ jobs:
           mkdir -p "$RUNNER_TEMP/testpath"
           ln -s "$PWD/_build/bin/git-filter-repo" "$RUNNER_TEMP/testpath/git-filter-repo"
           export PATH="$RUNNER_TEMP/testpath:$PATH"
-          make test-with-reftable TEST_PACKAGES="$(echo $pkgs)"
+          make test-with-reftable TEST_PACKAGES="$(echo $pkgs)" \
+            TEST_JSON_REPORT="$RUNNER_TEMP/tests.json" TEST_RERUN_REPORT="$RUNNER_TEMP/reruns.txt"
+
+      # As in the test job: list the re-run tests and keep their output.
+      - name: Re-run report
+        id: reruns
+        if: always()
+        run: bash .github/scripts/rerun-report.sh "$RUNNER_TEMP/reruns.txt" "test (reftable, ${{ matrix.group }})"
+
+      - name: Upload the test output of re-run tests
+        if: always() && steps.reruns.outputs.reruns == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-json-reftable-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/tests.json
+            ${{ runner.temp }}/reruns.txt
+          retention-days: 14
 
   # Pull requests: the storage core, configuration, CLI and SDK, and the
   # storage end-to-end tests. The full suite runs once the change is on main.

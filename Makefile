@@ -248,6 +248,10 @@ TEST_COVERAGE_DIR ?= ${BUILD_DIR}/cover
 TEST_TMP_DIR      ?=
 ## Custom options for gosumtest. These options are different from TEST_OPTIONS
 GOTESTSUM_OPTIONS ?=
+## Specify the location where gotestsum reports the tests it re-ran in CI (one line per test: runs
+## and failures). Set it here rather than through GOTESTSUM_OPTIONS on the command line, which
+## would replace the --rerun-fails that CI adds below.
+TEST_RERUN_REPORT ?=
 ## Directory where Gitaly should write logs to during test execution.
 TEST_LOG_DIR	  ?=
 TEST_REPO_DIR     := ${BUILD_DIR}/testrepos
@@ -261,6 +265,9 @@ ifdef CI
 	# We introduced this flag in fb75a2f11 (test: Enable the --rerun-fails flag, 2025-03-13) and specified
 	# it unconditionally. However, it's better to limit the reruns to CI only.
 	GOTESTSUM_OPTIONS += --rerun-fails --packages '$(TEST_PACKAGES)'
+ifneq (${TEST_RERUN_REPORT},)
+	GOTESTSUM_OPTIONS += --rerun-fails-report '${TEST_RERUN_REPORT}'
+endif
 endif
 
 # Git binaries that are eventually embedded into the Gitaly binary.
