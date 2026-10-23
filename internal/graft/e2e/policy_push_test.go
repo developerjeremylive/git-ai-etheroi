@@ -21,7 +21,7 @@ import (
 // opened to agents through [graft] agent_rpcs, the operator opt-in of
 // AGENT-SECURITY.md, and a policy that also lets the builder update
 // refs/graft/**, so that only the reservation of that namespace can refuse it.
-func startWithAgentPushes(t *testing.T, opts ...testserver.GitalyServerOpt) gitalyStack {
+func startWithAgentPushes(t *testing.T, standalone bool, opts ...testserver.GitalyServerOpt) gitalyStack {
 	t.Helper()
 
 	ex := loadExample(t)
@@ -30,7 +30,7 @@ func startWithAgentPushes(t *testing.T, opts ...testserver.GitalyServerOpt) gita
 		{Actor: "builder", Refs: []string{"refs/graft/**"}, Allow: true},
 	}, ex.graft.Policy...)
 
-	return startGitaly(t, ex.graft, ex.sharedToken, opts...)
+	return startGitalyInMode(t, ex.graft, ex.sharedToken, standalone, opts...)
 }
 
 // agentPush pushes refspec from the client repository at clientPath to the
@@ -73,11 +73,21 @@ func agentPush(t *testing.T, s gitalyStack, clientPath, token, agent, refspec st
 // accepted, and one it denies is refused by the policy in the pre-receive hook.
 // refs/graft/ is reserved for the server whatever the policy says: the builder
 // may update refs/graft/** by policy here, and git-receive-pack still refuses its
-// push there, because that namespace is hidden from agents.
+// push there, because that namespace is hidden from agents. The reservation is
+// not a rule of the policy: it holds outside standalone mode too.
 func TestPolicyHoldsOnAgentPushes(t *testing.T) {
 	t.Parallel()
 
-	s := startWithAgentPushes(t)
+	for _, standalone := range []bool{true, false} {
+		t.Run(fmt.Sprintf("standalone=%t", standalone), func(t *testing.T) {
+			t.Parallel()
+			testPolicyHoldsOnAgentPushes(t, standalone)
+		})
+	}
+}
+
+func testPolicyHoldsOnAgentPushes(t *testing.T, standalone bool) {
+	s := startWithAgentPushes(t, standalone)
 	base := writeMain(t, s, map[string]string{"README.md": "push\n"})
 
 	clientPath := filepath.Join(t.TempDir(), "client")
@@ -94,11 +104,14 @@ func TestPolicyHoldsOnAgentPushes(t *testing.T) {
 	require.True(t, ok, out)
 	require.Equal(t, pushed, s.git(t, "rev-parse", "refs/heads/feature/pushed"))
 
-	// A branch the policy denies is refused by the policy.
-	out, ok = agentPush(t, s, clientPath, builder, "builder", "HEAD:refs/heads/main")
-	require.False(t, ok, out)
-	require.Contains(t, out, `policy denies "builder" to update "refs/heads/main" (rule 3)`)
-	require.Equal(t, base, s.git(t, "rev-parse", "refs/heads/main"))
+	// A branch the policy denies is refused by the policy. Outside standalone mode
+	// that decision is GitLab's, which the test does not run.
+	if standalone {
+		out, ok = agentPush(t, s, clientPath, builder, "builder", "HEAD:refs/heads/main")
+		require.False(t, ok, out)
+		require.Contains(t, out, `policy denies "builder" to update "refs/heads/main" (rule 3)`)
+		require.Equal(t, base, s.git(t, "rev-parse", "refs/heads/main"))
+	}
 
 	// refs/graft/ is the server's, although the policy allows the builder there:
 	// git-receive-pack hides it from agents (receive.hideRefs), so git refuses the

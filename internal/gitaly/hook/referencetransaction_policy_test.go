@@ -10,6 +10,7 @@ import (
 
 	"github.com/feder-cr/git-ai/internal/git/gitcmd"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
+	"github.com/feder-cr/git-ai/internal/graft/identity"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -231,7 +232,60 @@ func TestEnforceGraftPolicy_refsGraftIsReserved(t *testing.T) {
 		require.NoError(t, m.enforceGraftPolicy(ctx, policyEnv(t, "agent-a", true), policyChanges("refs/heads/main")), name)
 	}
 
-	// Outside standalone mode nothing is decided here.
-	m := graftPolicyManager(t, config.Graft{})
-	require.NoError(t, m.enforceGraftPolicy(ctx, policyEnv(t, "agent-a", true), policyChanges("refs/graft/green/main")))
+	// Outside standalone mode the reservation still holds for agents: it is an invariant of the
+	// server, not a rule of the policy. The policy itself does not apply there.
+	for name, graft := range map[string]config.Graft{
+		"not standalone":            {Agents: []config.GraftAgent{{Name: "agent-a"}}},
+		"not standalone, a policy":  {Agents: []config.GraftAgent{{Name: "agent-a"}}, Policy: []config.GraftPolicyRule{{Allow: false}}},
+		"standalone, policy denies": {Standalone: true, Policy: []config.GraftPolicyRule{{Allow: false}}},
+	} {
+		m := graftPolicyManager(t, graft)
+		err := m.enforceGraftPolicy(ctx, policyEnv(t, "agent-a", true), policyChanges("refs/graft/green/main"))
+		require.Equal(t, codes.PermissionDenied, status.Code(err), name)
+		require.ErrorContains(t, err, "reserved for the server", name)
+		require.NoError(t, m.enforceGraftPolicy(ctx, policyEnv(t, "", false), policyChanges("refs/graft/green/main")), name)
+	}
+	m := graftPolicyManager(t, config.Graft{Agents: []config.GraftAgent{{Name: "agent-a"}}, Policy: []config.GraftPolicyRule{{Allow: false}}})
+	require.NoError(t, m.enforceGraftPolicy(ctx, policyEnv(t, "agent-a", true), policyChanges("refs/heads/main")),
+		"outside standalone mode the policy does not apply")
+}
+
+// TestCheckAgentPolicy checks the policy check of the RPCs that skip the pre-receive hook: the
+// reservation of refs/graft/ refuses an agent in every mode, the rest of the policy only in
+// standalone mode, and callers that are not agents are not restricted.
+func TestCheckAgentPolicy(t *testing.T) {
+	t.Parallel()
+
+	agentCtx := identity.NewContext(testhelper.Context(t), identity.Identity{Name: "agent-a", Source: identity.SourceAgent})
+	deny := []config.GraftPolicyRule{{Allow: false}}
+	reserved := fmt.Sprintf("%s %s refs/graft/green/main\n", policyOldOID, policyNewOID)
+	branch := fmt.Sprintf("%s %s refs/heads/main\n", policyOldOID, policyNewOID)
+
+	for name, graft := range map[string]config.Graft{
+		"standalone":     {Standalone: true, Policy: deny},
+		"not standalone": {Policy: deny},
+	} {
+		err := CheckAgentPolicy(agentCtx, graft, reserved)
+		require.Equal(t, codes.PermissionDenied, status.Code(err), name)
+		require.ErrorContains(t, err, "reserved for the server", name)
+		require.NoError(t, CheckAgentPolicy(testhelper.Context(t), graft, reserved), "%s: not an agent", name)
+	}
+
+	err := CheckAgentPolicy(agentCtx, config.Graft{Standalone: true, Policy: deny}, branch)
+	require.Equal(t, codes.PermissionDenied, status.Code(err))
+	require.NoError(t, CheckAgentPolicy(agentCtx, config.Graft{Policy: deny}, branch), "outside standalone mode the policy does not apply")
+}
+
+// TestEnforceGraftPolicy_missingMetadataWithAgents: an update whose metadata cannot be read cannot be
+// told apart from an agent's, so it is refused whenever agents are configured, in every mode; without
+// agents and without a policy to apply there is nothing to decide.
+func TestEnforceGraftPolicy_missingMetadataWithAgents(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	agents := []config.GraftAgent{{Name: "agent-a"}}
+	require.Error(t, graftPolicyManager(t, config.Graft{Agents: agents}).enforceGraftPolicy(ctx, nil, policyChanges("refs/heads/main")))
+	require.Error(t, graftPolicyManager(t, config.Graft{Standalone: true, Agents: agents}).enforceGraftPolicy(ctx, nil, policyChanges("refs/heads/main")))
+	require.NoError(t, graftPolicyManager(t, config.Graft{}).enforceGraftPolicy(ctx, nil, policyChanges("refs/heads/main")))
+	require.NoError(t, graftPolicyManager(t, config.Graft{Standalone: true}).enforceGraftPolicy(ctx, nil, policyChanges("refs/heads/main")))
 }

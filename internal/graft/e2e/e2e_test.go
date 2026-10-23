@@ -146,11 +146,21 @@ func startExampleUnbatched(t *testing.T) gitalyStack {
 func startGitaly(t *testing.T, graft config.Graft, sharedToken string, opts ...testserver.GitalyServerOpt) gitalyStack {
 	t.Helper()
 
+	return startGitalyInMode(t, graft, sharedToken, true, opts...)
+}
+
+// startGitalyInMode is startGitaly with standalone mode on or off. Off, the agents of
+// graft still authenticate, but the request defaults and the policy of standalone
+// mode do not apply; the access checks of the pre-receive hook still go to the
+// standalone client, which stands in for GitLab here.
+func startGitalyInMode(t *testing.T, graft config.Graft, sharedToken string, standalone bool, opts ...testserver.GitalyServerOpt) gitalyStack {
+	t.Helper()
+
 	ctx := featureflag.OutgoingCtxWithFeatureFlag(testhelper.Context(t), featureflag.GPGSigning, false)
 	cfg := testcfg.Build(t)
 	cfg.Auth.Token = sharedToken
 	cfg.Graft = graft
-	cfg.Graft.Standalone = true
+	cfg.Graft.Standalone = standalone
 
 	testcfg.BuildGitalySSH(t, cfg)
 	testcfg.BuildGitalyHooks(t, cfg)

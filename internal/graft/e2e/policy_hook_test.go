@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -20,12 +21,17 @@ import (
 // own: the real reference-transaction hook (git runs the gitaly-hooks binary,
 // which calls the server's HookService), run by git update-ref with the hooks
 // payload that the server builds for a write of an agent, as for an RPC or a
-// push. The earlier layers (the pre-receive hook, CheckAgentPolicy, the agents'
-// receive.hideRefs) do not take part, so the hook decides alone:
+// push. The earlier layers (the request filter, the pre-receive hook,
+// CheckAgentPolicy, the agents' receive.hideRefs) do not take part, so the hook
+// decides alone:
 //   - refs/graft/x is refused although the policy lets the builder update
-//     refs/graft/** (startWithAgentPushes), because that namespace is the server's;
+//     refs/graft/** (startWithAgentPushes), because that namespace is the
+//     server's, in standalone mode and outside it;
+//   - so is an update through a symbolic reference whose target is under
+//     refs/graft/: the hook sees the target;
 //   - a branch the policy allows is written;
-//   - a branch the policy denies (main for the builder) is refused.
+//   - a branch the policy denies (main for the builder) is refused in standalone
+//     mode, and written outside it, where the policy does not apply.
 //
 // git only reports that the hook aborted the transaction, so the reason of each
 // refusal is read from the hook's log entry in the server. TestPolicyHoldsOnAgentPushes
@@ -33,9 +39,18 @@ import (
 func TestPolicyHookDecidesForAgentUpdates(t *testing.T) {
 	t.Parallel()
 
+	for _, standalone := range []bool{true, false} {
+		t.Run(fmt.Sprintf("standalone=%t", standalone), func(t *testing.T) {
+			t.Parallel()
+			testPolicyHookDecidesForAgentUpdates(t, standalone)
+		})
+	}
+}
+
+func testPolicyHookDecidesForAgentUpdates(t *testing.T, standalone bool) {
 	logger := testhelper.NewLogger(t)
 	logs := testhelper.AddLoggerHook(logger)
-	s := startWithAgentPushes(t, testserver.WithLogger(logger))
+	s := startWithAgentPushes(t, standalone, testserver.WithLogger(logger))
 	mainCommit := writeMain(t, s, map[string]string{"README.md": "hook\n"})
 	next := gittest.WriteCommit(t, s.cfg, s.repoPath, gittest.WithParents(git.ObjectID(mainCommit)), gittest.WithMessage("next"))
 
@@ -60,11 +75,11 @@ func TestPolicyHookDecidesForAgentUpdates(t *testing.T) {
 		}
 		return commitErr
 	}
-	// hookDenials returns the reasons of the hook's policy denials logged so far.
+	// hookDenials returns the reasons of the hook's denials logged so far.
 	hookDenials := func() []string {
 		var reasons []string
 		for _, entry := range logs.AllEntries() {
-			if entry.Message == "standalone policy denied reference transaction" {
+			if entry.Message == "agent reference update denied" {
 				reasons = append(reasons, entry.Data["reason"].(string))
 			}
 		}
@@ -76,13 +91,29 @@ func TestPolicyHookDecidesForAgentUpdates(t *testing.T) {
 	require.Equal(t, next.String(), s.git(t, "rev-parse", "refs/heads/feature/hook"))
 	require.Empty(t, hookDenials())
 
-	require.Error(t, update("refs/heads/main", next, git.ObjectID(mainCommit)))
-	require.Equal(t, mainCommit, s.git(t, "rev-parse", "refs/heads/main"))
-	require.Equal(t, []string{`policy denies "builder" to update "refs/heads/main" (rule 3)`}, hookDenials())
+	var want []string
+	if standalone {
+		require.Error(t, update("refs/heads/main", next, git.ObjectID(mainCommit)))
+		require.Equal(t, mainCommit, s.git(t, "rev-parse", "refs/heads/main"))
+		want = append(want, `policy denies "builder" to update "refs/heads/main" (rule 3)`)
+	} else {
+		require.NoError(t, update("refs/heads/main", next, git.ObjectID(mainCommit)))
+		require.Equal(t, next.String(), s.git(t, "rev-parse", "refs/heads/main"))
+	}
+	require.Equal(t, want, hookDenials())
 
 	require.Error(t, update("refs/graft/x", next, zero))
 	require.Empty(t, s.git(t, "for-each-ref", "refs/graft/"))
+
+	// A symbolic reference to refs/graft/x, which only the server could have made: the
+	// update of the symbolic reference writes its target, and the hook refuses that.
+	s.git(t, "symbolic-ref", "refs/heads/alias", "refs/graft/x")
+	require.Error(t, update("refs/heads/alias", next, zero))
+	require.Empty(t, s.git(t, "for-each-ref", "refs/graft/"))
+
 	denials := hookDenials()
-	require.Len(t, denials, 2)
-	require.True(t, strings.HasPrefix(denials[1], `"refs/graft/x" is under refs/graft/, which is reserved for the server`), denials[1])
+	require.Len(t, denials, len(want)+2)
+	for _, denial := range denials[len(want):] {
+		require.True(t, strings.HasPrefix(denial, `"refs/graft/x" is under refs/graft/, which is reserved for the server`), denial)
+	}
 }

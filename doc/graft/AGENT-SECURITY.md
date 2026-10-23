@@ -61,6 +61,8 @@ These can never be enabled, not even through `graft.agent_rpcs`:
 - `RefService` `UpdateReferences` and `DeleteRefs`.
 - `RemoteService` `UpdateRemoteMirror`, `FindRemoteRepository` and
   `FindRemoteRootRef`, which push to or query a URL the caller chooses.
+- `SSHService` `SSHUploadArchive`, which reads any revision named in its own
+  input, `refs/graft/` included (see below).
 - `CleanupService`, `ObjectPoolService`, `HookService`, `InternalGitaly`,
   `PartitionService`, and `StorageCoreService` (imports, checkpoints and
   garbage collection, which deletes packs of the bucket).
@@ -144,25 +146,36 @@ Whatever the RPC and whatever the policy says, an agent never creates,
 updates or deletes a reference under `refs/graft/`. The namespace is the
 server's: the proposals of a land (`refs/graft/proposals/`, hidden from
 advertisement and push, written by the server) and graft-verify's green
-references (written with the shared token). Three layers enforce it, in the
-order a write meets them:
+references (written with the shared token). The reservation is not a rule of
+the policy: it holds in every mode, standalone or not, for every agent. The
+layers that enforce it, in the order a request meets them:
 
-1. A push (when an operator opens `SSHReceivePack` or the HTTP push to agents):
-   `git-receive-pack` runs with `receive.hideRefs=refs/graft/` for agents, so
-   git refuses the update ("deny updating a hidden ref") before any hook.
-2. The RPCs that update references without the pre-receive hook
+1. The agent allowlist. `UpdateReferences`, `DeleteRefs` and `WriteRef` are never
+   open to agents, and neither is `SSHUploadArchive`: git-upload-archive takes
+   the revision to archive in its own input, where the request filter cannot see
+   it, and ignores `uploadpack.hideRefs`.
+2. The request filter of the agent interceptor (`checkAgentRefs`): a request
+   whose revision, reference or pattern fields name `refs/graft/` is refused
+   before the RPC runs.
+3. On a push (when an operator opens `SSHReceivePack` or the HTTP push to
+   agents), `git-receive-pack` runs with `receive.hideRefs=refs/graft/` for
+   agents, so git refuses the update ("deny updating a hidden ref") before any
+   hook. The RPCs that update references without the pre-receive hook
    (`UserMergeToRef`, `UserRebaseToRef` when opened with `agent_rpcs`) check the
-   reservation with the policy before they write (`CheckAgentPolicy`), and
-   answer `PermissionDenied`. The other agent RPCs write only `refs/heads/`.
-   `UpdateReferences`, `DeleteRefs` and `WriteRef` are never open to agents.
-3. The reference-transaction hook refuses every agent update under
-   `refs/graft/` while the references are locked, whatever reached it.
+   reservation before they write (`CheckAgentPolicy`) and answer
+   `PermissionDenied`. The other agent RPCs write branches, the review roots
+   (`refs/keep-around/review/`) and, when opened with `agent_rpcs`, tags.
+4. The reference-transaction hook refuses every agent update under
+   `refs/graft/` while the references are locked, whatever reached it. It sees
+   the references git updates, so an update through a symbolic reference whose
+   target is under `refs/graft/` is refused too.
 
-`TestPolicyHoldsOnAgentPushes` in `internal/graft/e2e` pins the first layer on a
-real push, and `TestPolicyHookDecidesForAgentUpdates` the third one alone (the
-real hook, run by `git update-ref` with the payload of an agent's write). The
-pre-receive hook judges the policy only; it does not check the reservation,
-because no agent write reaches it with a `refs/graft/` update.
+`TestPolicyHoldsOnAgentPushes` in `internal/graft/e2e` pins layer 3 on a real
+push, and `TestPolicyHookDecidesForAgentUpdates` layer 4 alone (the real hook,
+run by `git update-ref` with the payload of an agent's write, a symbolic
+reference included), both in standalone mode and outside it. The pre-receive
+hook judges the policy only; it does not check the reservation, because no
+agent write reaches it with a `refs/graft/` update.
 
 Every other RPC that is not on the allowlist (for example the other
 `OperationService` RPCs such as `UserMergeBranch`, or `SSHService`) is denied

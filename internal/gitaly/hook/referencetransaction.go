@@ -456,7 +456,8 @@ func (m *GitLabHookManager) trackPendingTransaction(state ReferenceTransactionSt
 // refs/ and HEAD, so that a symbolic update of the default branch is decided
 // like any other update. Other pseudo-references are not governed.
 //
-// Outside standalone mode, or with an empty policy, it does nothing.
+// The reservation of refs/graft/ (GraftReservedRefPrefix) applies to agents in every mode; the
+// rest of the policy applies only in standalone mode with a policy.
 func (m *GitLabHookManager) enforceGraftPolicy(ctx context.Context, env []string, changes []byte) error {
 	message, err := m.graftPolicyDecision(env, changes)
 	if err != nil {
@@ -468,7 +469,7 @@ func (m *GitLabHookManager) enforceGraftPolicy(ctx context.Context, env []string
 		m.logger.WithFields(log.Fields{
 			"actor":  meta.Actor,
 			"reason": message,
-		}).InfoContext(ctx, "standalone policy denied reference transaction")
+		}).InfoContext(ctx, "agent reference update denied")
 
 		return structerr.NewPermissionDenied("%s", message)
 	}
@@ -480,15 +481,13 @@ func (m *GitLabHookManager) enforceGraftPolicy(ctx context.Context, env []string
 // denial of the transaction, or an empty message when the policy allows it or
 // does not apply to it.
 func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (string, error) {
-	if !m.cfg.Graft.Standalone {
-		return "", nil
-	}
+	policyApplies := m.cfg.Graft.Standalone && len(m.cfg.Graft.Policy) > 0
 
 	meta, err := gitcmd.ChangelogMetaFromEnv(env)
 	if err != nil {
-		if len(m.cfg.Graft.Policy) == 0 {
-			// Without a policy the metadata decides nothing but the reservation of refs/graft/,
-			// which needs an agent the metadata names.
+		// The metadata names the agent of the update. Without agents and without a policy to
+		// apply there is nothing to decide; otherwise the update cannot be judged.
+		if !policyApplies && len(m.cfg.Graft.Agents) == 0 {
 			return "", nil
 		}
 		return "", fmt.Errorf("reading graft metadata: %w", err)
@@ -514,11 +513,13 @@ func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (s
 		return "", nil
 	}
 
-	// refs/graft/ is the server's, whatever the policy says.
+	// refs/graft/ is the server's, whatever the policy says and whether or not the server runs
+	// in standalone mode: it is not a rule of the policy but an invariant of the server, for
+	// every agent.
 	if message := graftReservedDenial(changes); message != "" {
 		return message, nil
 	}
-	if len(m.cfg.Graft.Policy) == 0 {
+	if !policyApplies {
 		return "", nil
 	}
 
@@ -538,21 +539,19 @@ func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (s
 // checks it first to return the policy message with PermissionDenied.
 //
 // Like enforceGraftPolicy, it decides only for a caller that authenticated with
-// a per-agent token, outside standalone mode or with an empty policy it does
-// nothing, and the decision is final: the hook still runs afterwards.
+// a per-agent token: the reservation of refs/graft/ in every mode, the rest of
+// the policy only in standalone mode with a policy. The hook still runs
+// afterwards.
 func CheckAgentPolicy(ctx context.Context, graft config.Graft, changes string) error {
-	if !graft.Standalone {
-		return nil
-	}
-
 	id, ok := identity.FromContext(ctx)
 	if !ok || id.Source != identity.SourceAgent {
 		return nil
 	}
+	// The reservation of refs/graft/ holds in every mode, as in the hook.
 	if message := graftReservedDenial([]byte(changes)); message != "" {
 		return structerr.NewPermissionDenied("%s", message)
 	}
-	if len(graft.Policy) == 0 {
+	if !graft.Standalone || len(graft.Policy) == 0 {
 		return nil
 	}
 
@@ -599,7 +598,11 @@ func graftPolicyDenial(policy []config.GraftPolicyRule, actor string, changes []
 // GraftReservedRefPrefix is the namespace of the references that only the server writes: the
 // proposals of a land (refs/graft/proposals/) and graft-verify's green references, which it
 // writes with the shared token. An agent never creates, updates or deletes a reference under it,
-// whatever the policy says, by any RPC or a push: the reference-transaction hook refuses it.
+// whatever the policy says and in every mode. The layers that refuse it, in the order a write
+// meets them: the request filter of the agent interceptor (a request that names it), git's
+// receive.hideRefs on a push, CheckAgentPolicy in the RPCs that skip the pre-receive hook, and
+// last the reference-transaction hook (graftPolicyDecision), which sees the references git
+// actually updates, the target of a symbolic reference included. See doc/graft/AGENT-SECURITY.md.
 const GraftReservedRefPrefix = "refs/graft/"
 
 // graftReservedDenial returns the denial of changes that update a reference under

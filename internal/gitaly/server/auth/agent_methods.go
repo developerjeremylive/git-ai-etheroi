@@ -65,7 +65,15 @@ var agentNeverAllowedServices = []string{
 // authorization header and a resolved address that pins DNS. Like
 // CreateRepositoryFromURL, they would let an agent make the server send requests
 // to any address, including internal ones (server-side request forgery).
+//
+// SSHService.SSHUploadArchive runs git-upload-archive, which takes the revision
+// to archive in its own pkt-line input, not in a field of the request, and does
+// not honour uploadpack.hideRefs. The request filter cannot see that revision,
+// so an agent could read refs/graft/ by name with `git archive --remote`. No
+// graft client needs it (RepositoryService.GetArchive names its revision in a
+// field the filter checks), so it is never allowed rather than parsed.
 var agentNeverAllowedMethods = map[string]struct{}{
+	gitalypb.SSHService_SSHUploadArchive_FullMethodName:                    {},
 	gitalypb.RemoteService_UpdateRemoteMirror_FullMethodName:               {},
 	gitalypb.RemoteService_FindRemoteRepository_FullMethodName:             {},
 	gitalypb.RemoteService_FindRemoteRootRef_FullMethodName:                {},
