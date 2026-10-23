@@ -570,9 +570,10 @@ func WithGitLabClient(gitlabClient gitlab.Client) GitalyServerOpt {
 	}
 }
 
-// WithGraftPolicy sets the store of the standalone access policy that the hook manager and the
-// services read, so that a test can reload the policy while the server runs. Without it, the server
-// has a store of the configuration's policy.
+// WithGraftPolicy sets the store of the standalone access policy that the server's hook manager and
+// the services read, so that a test can reload the policy while the server runs. Without it, the
+// server has a store of the configuration's policy. A hook manager that WithHookManager sets keeps
+// its own store, which this one does not reach.
 func WithGraftPolicy(store *policystore.Store) GitalyServerOpt {
 	return func(deps gitalyServerDeps) gitalyServerDeps {
 		deps.graftPolicy = store

@@ -70,7 +70,7 @@ func (m *GitLabHookManager) storagePreparing(ctx context.Context, payload gitcmd
 		return
 	}
 
-	if message, _, err := m.graftPolicyDecision(m.policy.Current(), env, changes); err != nil || message != "" {
+	if decision, err := m.graftPolicyDecision(m.policy.Current(), env, changes); err != nil || decision.denial != "" {
 		return
 	}
 

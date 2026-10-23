@@ -15,6 +15,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/git/gittest"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
 	"github.com/feder-cr/git-ai/internal/gitaly/hook"
+	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/helper/text"
 	"github.com/feder-cr/git-ai/internal/testhelper"
@@ -32,11 +33,23 @@ import (
 // decides in the prepared phase.
 type policyReloader struct {
 	hook.Manager
-	t       *testing.T
 	store   *policystore.Store
 	running config.Graft
 	armed   atomic.Pointer[[]config.GraftPolicyRule]
 	fired   atomic.Bool
+	// failure is the error of a reload that did not apply. The hook runs on a goroutine of the
+	// server, which must not fail the test: the error is returned to the hook's caller and kept
+	// for requireReloaded.
+	failure atomic.Pointer[error]
+}
+
+// requireReloaded asserts that the armed reload ran and applied its policy.
+func (r *policyReloader) requireReloaded(t *testing.T) {
+	t.Helper()
+	require.True(t, r.fired.Load(), "the policy was reloaded in flight")
+	if failure := r.failure.Load(); failure != nil {
+		require.NoError(t, *failure, "the reload in flight")
+	}
 }
 
 // arm makes the next reference-transaction hook reload the policy to rules.
@@ -50,9 +63,14 @@ func (r *policyReloader) ReferenceTransactionHook(ctx context.Context, state hoo
 		next := r.running
 		next.Policy = *rules
 		outcome, err := r.store.Reload(next, r.running)
-		require.NoError(r.t, err)
-		require.Equal(r.t, policystore.Applied, outcome.Result)
+		if err == nil && outcome.Result != policystore.Applied {
+			err = fmt.Errorf("the reload in flight was %s, not applied", outcome.Result)
+		}
 		r.fired.Store(true)
+		if err != nil {
+			r.failure.Store(&err)
+			return err
+		}
 	}
 	return r.Manager.ReferenceTransactionHook(ctx, state, env, stdin)
 }
@@ -60,7 +78,7 @@ func (r *policyReloader) ReferenceTransactionHook(ctx context.Context, state hoo
 // setupPolicyReload starts the agents' land service of graft, with more server options, with a
 // policyReloader around its hook manager.
 func setupPolicyReload(t *testing.T, ctx context.Context, graft config.Graft, options ...testserver.GitalyServerOpt) (context.Context, config.Cfg, agentLandClient, *policyReloader) {
-	reloader := &policyReloader{t: t, store: policystore.New(graft.Policy), running: graft}
+	reloader := &policyReloader{store: policystore.New(graft.Policy), running: graft}
 	ctx, cfg, client := setupAgentLandServiceWith(t, ctx, graft, reloader.store, append(options, testserver.WithHookManagerWrapper(func(manager hook.Manager) hook.Manager {
 		reloader.Manager = manager
 		return reloader
@@ -109,15 +127,26 @@ func testUserLandPolicyReloadedInFlight(t *testing.T, ctx context.Context) {
 	t.Run("a tightening refuses an update its earlier checks allowed", func(t *testing.T) {
 		t.Parallel()
 
-		ctx, cfg, client, reloader := setupPolicyReload(t, ctx, unbatchedGraft(nil))
+		logger := testhelper.NewLogger(t)
+		logs := testhelper.AddLoggerHook(logger)
+		ctx, cfg, client, reloader := setupPolicyReload(t, ctx, unbatchedGraft(nil), testserver.WithLogger(logger))
 		repo, repoPath, base, change := policyReloadRepo(t, ctx, cfg)
 
 		reloader.arm(denyMainFor("bot"))
 		_, errs := landInOrder(t, ctx, client, repo, agentLanding{agent: "bot", commit: change("b")})
 
-		require.True(t, reloader.fired.Load(), "the policy was reloaded in flight")
+		reloader.requireReloaded(t)
 		testhelper.RequireGrpcCode(t, errs[0], codes.PermissionDenied)
 		require.Equal(t, base.String(), text.ChompBytes(gittest.Exec(t, cfg, "-C", repoPath, "rev-parse", "refs/heads/"+git.DefaultBranch)))
+		// The hook denied it, with the policy of the reload, not an earlier check.
+		var deniedByHook bool
+		for _, entry := range logs.AllEntries() {
+			if entry.Message == "agent reference update denied" && entry.Data["actor"] == "bot" {
+				require.Equal(t, uint64(2), entry.Data["policy_generation"])
+				deniedByHook = true
+			}
+		}
+		require.True(t, deniedByHook, "the reference-transaction hook denied the update")
 	})
 
 	t.Run("a loosening lets the refused land again", func(t *testing.T) {
@@ -156,7 +185,7 @@ func testUserLandPolicyReloadedInFlight(t *testing.T, ctx context.Context) {
 			agentLanding{agent: "carol", commit: change("c")},
 		)
 
-		require.True(t, reloader.fired.Load(), "the policy was reloaded in flight")
+		reloader.requireReloaded(t)
 		testhelper.RequireGrpcCode(t, errs[0], codes.PermissionDenied)
 		require.Equal(t, "bot", landErrorDetail(t, errs[0]).GetAccessCheck().GetUserId())
 		require.NoError(t, errs[1])
@@ -219,7 +248,7 @@ func testUserLandAccessCheckNamesTheAgent(t *testing.T, ctx context.Context) {
 			agentLanding{agent: "bot", commit: change("b")},
 			agentLanding{agent: "alice", commit: change("a")},
 		)
-		require.True(t, reloader.fired.Load(), "the policy was reloaded in flight")
+		reloader.requireReloaded(t)
 		requireDeniedAs(t, errs[0], "bot")
 		require.NoError(t, errs[1])
 	})
@@ -240,15 +269,35 @@ func TestUserLand_policyReloadsDuringConcurrentLands(t *testing.T) {
 func testUserLandPolicyReloadsDuringConcurrentLands(t *testing.T, ctx context.Context) {
 	t.Parallel()
 
-	const agents, landsPerAgent = 4, 4
 	allowAll := []config.GraftPolicyRule{{Actor: "*", Allow: true}}
+	t.Run("unbatched", func(t *testing.T) {
+		t.Parallel()
+		concurrentLandsDuringReloads(t, ctx, unbatchedGraft(allowAll), false)
+	})
+	t.Run("batched", func(t *testing.T) {
+		t.Parallel()
+		concurrentLandsDuringReloads(t, ctx, config.Graft{
+			Standalone: true,
+			Policy:     allowAll,
+			Land:       config.GraftLand{Batch: config.GraftLandBatch{Window: "20ms"}},
+		}, true)
+	})
+}
+
+// concurrentLandsDuringReloads is the test of TestUserLand_policyReloadsDuringConcurrentLands on a
+// service of graft, whose policy allows every agent. When batched, the hook decides only the
+// requests that land alone, so the checks of its decisions that need one for every land are not
+// made; a batch admitted under a generation that is no longer in force is refused by the hook.
+func concurrentLandsDuringReloads(t *testing.T, ctx context.Context, graft config.Graft, batched bool) {
+	const agents, landsPerAgent = 4, 4
+	allowAll := graft.Policy
 	denyAgent0 := denyMainFor("agent-0")
 	versions := []any{policystore.Hash(allowAll), policystore.Hash(denyAgent0)}
 
 	// The allowed updates are logged at DEBUG.
 	logger := testhelper.NewLogger(t, testhelper.WithLevel(logrus.DebugLevel))
 	logs := testhelper.AddLoggerHook(logger)
-	ctx, cfg, client, reloader := setupPolicyReload(t, ctx, unbatchedGraft(allowAll), testserver.WithLogger(logger))
+	ctx, cfg, client, reloader := setupPolicyReload(t, ctx, graft, testserver.WithLogger(logger))
 	repo, repoPath, _, change := policyReloadRepo(t, ctx, cfg)
 
 	commits := make([][]git.ObjectID, agents)
@@ -369,14 +418,35 @@ func testUserLandPolicyReloadsDuringConcurrentLands(t *testing.T, ctx context.Co
 			require.Equal(t, policystore.Hash(denyAgent0), sha, "agent-0 is denied only by the version that denies it")
 		}
 	}
-	require.LessOrEqual(t, landed["agent-0"], allowedOfAgent0, "every land of agent-0 was allowed by the hook")
-	require.GreaterOrEqual(t, decisions, landsPerAgent*(agents-1)+landed["agent-0"], "the hook decided every land")
-	// The agents that every version allows reach the hook with their last land: the hook decided it
-	// with the policy in force then, not an older one.
-	for a := 1; a < agents; a++ {
-		require.Greater(t, lastStart[a], uint64(1), "agent-%d's last land started after reloads", a)
-		require.GreaterOrEqual(t, lastDecided[fmt.Sprintf("agent-%d", a)], lastStart[a], "agent-%d's last land was decided by the policy in force", a)
+	if !batched {
+		require.LessOrEqual(t, landed["agent-0"], allowedOfAgent0, "every land of agent-0 was allowed by the hook")
+		require.GreaterOrEqual(t, decisions, landsPerAgent*(agents-1)+landed["agent-0"], "the hook decided every land")
+		// The agents that every version allows reach the hook with their last land: the hook
+		// decided it with the policy in force then, not an older one.
+		for a := 1; a < agents; a++ {
+			require.Greater(t, lastStart[a], uint64(1), "agent-%d's last land started after reloads", a)
+			require.GreaterOrEqual(t, lastDecided[fmt.Sprintf("agent-%d", a)], lastStart[a], "agent-%d's last land was decided by the policy in force", a)
+		}
 	}
+
+	// The changeset log records each land with the agent that made it, the member of a batched
+	// land with its own: as many as landed for each agent, none for a denied land.
+	entries, err := changelog.List(repoPath, 0, 1000)
+	require.NoError(t, err)
+	recorded := map[string]int{}
+	for _, entry := range entries {
+		if entry.Reference != git.DefaultRef.String() {
+			continue
+		}
+		if entry.Operation == changelog.OperationLandBatch {
+			for _, member := range entry.Members {
+				recorded[member.Actor]++
+			}
+			continue
+		}
+		recorded[entry.Actor]++
+	}
+	require.Equal(t, landed, recorded)
 
 	require.Len(t, mainFiles(t, cfg, repoPath), 1+landsPerAgent*(agents-1)+landed["agent-0"])
 }
