@@ -845,7 +845,16 @@ func TestResolveStartBranch(t *testing.T) {
 		{name: "main", refs: []string{"refs/heads/main", "refs/remotes/main"}, expected: "refs/heads/main^{commit}"},
 		{name: "heads/main", refs: []string{"refs/heads/main", "refs/heads/heads/main"}, expected: "refs/heads/main^{commit}"},
 		{name: "tags/v1", refs: []string{"refs/tags/v1"}, expected: "refs/tags/v1^{commit}"},
-		{name: "tags/v1", refs: []string{"refs/tags/v1", "refs/heads/tags/v1"}, expected: "refs/heads/tags/v1^{commit}"},
+		// A name that names its namespace follows git, whatever branch has that name.
+		{name: "tags/v1", refs: []string{"refs/tags/v1", "refs/heads/tags/v1"}, expected: "refs/tags/v1^{commit}"},
+		{
+			name:     "remotes/origin/main",
+			refs:     []string{"refs/remotes/origin/main", "refs/heads/remotes/origin/main"},
+			expected: "refs/remotes/origin/main^{commit}",
+		},
+		{name: "a/b", refs: []string{"refs/a/b", "refs/heads/a/b"}, expected: "refs/a/b^{commit}"},
+		// A tag of the same name is beaten by the branch, with or without a namespace in the name.
+		{name: "a/b", refs: []string{"refs/tags/a/b", "refs/heads/a/b"}, expected: "refs/heads/a/b^{commit}"},
 		{name: "origin/x", refs: []string{"refs/remotes/origin/x"}, expected: "refs/remotes/origin/x^{commit}"},
 		{name: "origin", refs: []string{"refs/remotes/origin/HEAD"}, expected: "refs/remotes/origin/HEAD^{commit}"},
 		{name: "main~1", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "refs/heads/main~1^{commit}"},

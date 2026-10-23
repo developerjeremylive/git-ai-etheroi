@@ -215,9 +215,11 @@ func (s *Server) UserRevert(ctx context.Context, req *gitalypb.UserRevertRequest
 // takes a full object ID (in either case) for the object, a root reference such as HEAD or
 // FETCH_HEAD from the repository's directory, and any other name x by its DWIM rules, the first
 // that exists of refs/x, refs/tags/x, refs/heads/x, refs/remotes/x and refs/remotes/x/HEAD. The
-// one deviation: when that is refs/x or refs/tags/x, not a branch, and the branch refs/heads/x
-// exists, the branch is taken. An existing branch of the exact name beats a non-branch reference
-// of the same name, such as a tag an agent pushed to shadow it; everything else follows git. When
+// one deviation: when that is a reference with the same name as the branch, the tag refs/tags/x or,
+// when x names no namespace (no /), refs/x, and the branch refs/heads/x exists, the branch is taken.
+// An existing branch of the exact name beats a non-branch reference of the same name, such as a tag
+// an agent pushed to shadow it; a name such as tags/v1 or remotes/origin/main names its namespace,
+// and everything else follows git. When
 // no reference is named x, git's resolution answers, by design: a SHA (abbreviated) or another
 // revision keeps working as a start point, as before.
 //
@@ -275,7 +277,10 @@ func startReference(name string, exists func(git.ReferenceName) (bool, error)) (
 		if !found {
 			continue
 		}
-		if (candidate == other || candidate == tag) && !strings.HasPrefix(candidate.String(), "refs/heads/") {
+		// The deviation applies to a reference with the same name as the branch: the tag
+		// refs/tags/x, or refs/x when x names no namespace. A name such as tags/v1 or
+		// remotes/origin/main names its namespace, and follows git.
+		if candidate == tag || (candidate == other && !strings.Contains(name, "/")) {
 			isBranch, err := exists(branch)
 			if err != nil {
 				return "", err
