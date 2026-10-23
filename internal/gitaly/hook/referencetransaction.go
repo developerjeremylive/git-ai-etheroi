@@ -472,7 +472,9 @@ func (m *GitLabHookManager) enforceGraftPolicy(ctx context.Context, env []string
 	}
 
 	// Each decision names the policy that took it, so that an operator can tell which generation
-	// decided an update while policies are reloaded.
+	// decided an update while policies are reloaded: a denial at INFO, as before, and an allowed
+	// update at DEBUG, since agents land many times a second and the changelog already records
+	// who landed what.
 	meta, _ := gitcmd.ChangelogMetaFromEnv(env)
 	fields := log.Fields{
 		"actor":             meta.Actor,
@@ -485,7 +487,7 @@ func (m *GitLabHookManager) enforceGraftPolicy(ctx context.Context, env []string
 
 		return structerr.NewPermissionDenied("%s", message)
 	}
-	m.logger.WithFields(fields).InfoContext(ctx, "agent reference update allowed by the policy")
+	m.logger.WithFields(fields).DebugContext(ctx, "agent reference update allowed by the policy")
 
 	return nil
 }

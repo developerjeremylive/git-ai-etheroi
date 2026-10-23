@@ -20,6 +20,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testserver"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -186,7 +187,8 @@ func testUserLandPolicyReloadsDuringConcurrentLands(t *testing.T, ctx context.Co
 	denyAgent0 := denyMainFor("agent-0")
 	versions := []any{policystore.Hash(allowAll), policystore.Hash(denyAgent0)}
 
-	logger := testhelper.NewLogger(t)
+	// The allowed updates are logged at DEBUG.
+	logger := testhelper.NewLogger(t, testhelper.WithLevel(logrus.DebugLevel))
 	logs := testhelper.AddLoggerHook(logger)
 	ctx, cfg, client, reloader := setupPolicyReload(t, ctx, unbatchedGraft(allowAll), testserver.WithLogger(logger))
 	repo, repoPath, _, change := policyReloadRepo(t, ctx, cfg)
