@@ -871,6 +871,66 @@ What this shows:
   every object the upload needs. The design required a 10 ms drop of the
   Preparing mean on both backends, so the reuse was not built.
 
+### Where the upload time goes
+
+Measured on 2026-10-23, to decide whether the uploads of a file bucket should
+share their directory fsyncs.
+
+Setup:
+- `Put` of a file bucket timed step by step: create the temporary file, write
+  and hash, fsync the file, link it to its key, remove the temporary name, and
+  fsync the directories. The timing was a temporary patch, not shipped.
+- The same WSL ext4 disk as above (`data=ordered`), with nothing else running:
+  the CPU was at least 98.5% idle and its pressure (PSI, `some avg10`) at most
+  2.53 before and after every series.
+- Pack keys of one repository (`same-repo`), or of one repository per writer
+  (`repo-per-worker`); packs of 4 KiB (the size class of a land) and 256 KiB;
+  1, 10 and 50 concurrent writers, 20 uploads each, after one upload per
+  repository that made its directories durable.
+- Two modes: as shipped, and with the directory fsync skipped. The second mode
+  is the upper bound of any scheme that shares or groups directory fsyncs.
+- Four series of each mode, alternating. The numbers are the median of the four
+  series; the range is the lowest and the highest series.
+
+Mean of one upload, as shipped, in ms:
+
+| layout | pack | writers | upload (range) | p99 | file fsync | directory fsync |
+|---|---:|---:|---:|---:|---:|---:|
+| same-repo | 4 KiB | 1 | 6.7 (5.5–7.4) | 7.9 | 3.5 | 2.9 |
+| same-repo | 4 KiB | 10 | 12.2 (10.5–12.7) | 15.7 | 5.6 | 5.4 |
+| same-repo | 4 KiB | 50 | 13.2 (12.6–15.0) | 21.3 | 6.2 | 5.4 |
+| same-repo | 256 KiB | 1 | 11.4 (10.9–12.4) | 14.2 | 5.8 | 3.4 |
+| same-repo | 256 KiB | 10 | 21.8 (19.8–24.4) | 30.7 | 11.1 | 7.6 |
+| same-repo | 256 KiB | 50 | 46.4 (36.9–206.8) | 82.8 | 22.6 | 17.6 |
+| repo-per-worker | 4 KiB | 10 | 18.5 (12.3–32.4) | 26.3 | 9.1 | 8.7 |
+| repo-per-worker | 256 KiB | 50 | 45.5 (36.4–149.5) | 86.4 | 22.0 | 18.7 |
+
+What this shows:
+- **An upload is two fsyncs.** Once its directories are durable, an upload
+  fsyncs its file and one directory, each 3–6 ms on an idle disk. The other
+  steps take less than 1 ms up to 10 writers.
+- **Sharing the directory fsync is not worth it.** Skipping it entirely saves
+  0.9–4.3 ms per upload of a 4 KiB pack, and 2.5–3.2 ms for a 256 KiB pack with
+  one writer. With 256 KiB packs and 10 or 50 writers it makes the upload
+  slower, by 18–100 ms in the mean, with a p99 of 357–575 ms: without the
+  directory fsync pacing the writers, each file fsync carries a larger journal
+  commit (the file fsync grows from 22 ms to 125–136 ms at 50 writers). The
+  file fsync itself cannot be shared, because every pack must be durable before
+  its link and its database row. Not built.
+- **The tails above come from the disk, not from `Put`.** In isolation, at the
+  size of a land's pack and 10 writers, an upload averages 12–18 ms with a p99
+  of 16–26 ms. The 462 ms and 2.2 s tails measured during the benchmark come
+  from the other writers of the same disk's fsyncs: the database, git and the
+  bucket.
+- **The variance is large.** Identical series differ by up to 4× at 256 KiB
+  and 50 writers, and at 10 writers the sign of the difference between the two
+  modes is not stable. Four series per mode were enough to rule out a gain of
+  the size we require (10 ms), not to measure small differences.
+
+Where to put a file bucket: on a different device from the database and from
+the repositories, so that its fsyncs do not queue behind theirs. An
+object-store bucket has no local fsync; it was not measured here.
+
 ## Limits
 
 - **Git still needs a local repository.** "Stateless" means that the local
