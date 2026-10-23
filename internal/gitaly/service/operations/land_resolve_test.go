@@ -30,6 +30,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/graft/resolver"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
+	"github.com/feder-cr/git-ai/internal/testhelper/testserver"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -204,7 +205,14 @@ func newResolveFixtureWith(t *testing.T, rcfg config.GraftResolver, baseEntries,
 func newResolveFixtureIn(t *testing.T, graft config.Graft, baseEntries, tipEntries, commitEntries []gittest.TreeEntry) resolveFixture {
 	t.Helper()
 
-	cfg := testcfg.Build(t)
+	return newResolveFixtureOn(t, testcfg.Build(t), graft, baseEntries, tipEntries, commitEntries)
+}
+
+// newResolveFixtureOn is newResolveFixtureIn on the configuration cfg, with the options of the
+// server.
+func newResolveFixtureOn(t *testing.T, cfg config.Cfg, graft config.Graft, baseEntries, tipEntries, commitEntries []gittest.TreeEntry, options ...testserver.GitalyServerOpt) resolveFixture {
+	t.Helper()
+
 	cfg.Graft = graft
 	var lanes *landlane.Shared
 	if graft.Standalone {
@@ -215,7 +223,7 @@ func newResolveFixtureIn(t *testing.T, graft config.Graft, baseEntries, tipEntri
 	}
 	testcfg.BuildGitalySSH(t, cfg)
 	testcfg.BuildGitalyHooks(t, cfg)
-	cfg.SocketPath = runOperationServiceServerWithLanes(t, cfg, lanes)
+	cfg.SocketPath = runOperationServiceServerWithLanes(t, cfg, lanes, options...)
 	client, conn := newOperationClient(t, cfg.SocketPath)
 	t.Cleanup(func() { conn.Close() })
 	ctx := testhelper.MergeOutgoingMetadata(testhelper.Context(t), testcfg.GitalyServersMetadataFromCfg(t, cfg))
@@ -268,10 +276,12 @@ func (fx resolveFixture) server(t *testing.T, rcfg config.GraftResolver) *Server
 	if rcfg.Verify.Enabled {
 		pool = resolver.NewVerifyPool(rcfg)
 	}
+	locator := config.NewLocator(fx.cfg)
 	return &Server{
 		logger: testhelper.NewLogger(t), gitConfig: fx.cfg.Git, resolveCfg: rcfg, conflictResolver: client, verifyPool: pool,
 		catfileCache:     cache,
-		localRepoFactory: localrepo.NewFactory(testhelper.NewLogger(t), config.NewLocator(fx.cfg), gittest.NewCommandFactory(t, fx.cfg), cache),
+		locator:          locator,
+		localRepoFactory: localrepo.NewFactory(testhelper.NewLogger(t), locator, gittest.NewCommandFactory(t, fx.cfg), cache),
 	}
 }
 

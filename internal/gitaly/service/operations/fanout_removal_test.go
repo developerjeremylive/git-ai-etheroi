@@ -136,3 +136,45 @@ func TestUserMergeToRef_fanOutDirectoryRemoved(t *testing.T) {
 	require.Equal(t, []string{ours.String(), theirs.String()}, merged.GetParentIds())
 	gittest.Exec(t, cfg, "-C", repoPath, "fsck", "--strict")
 }
+
+// The proposals that UserLand keeps of a resolver's answer are written outside the land's
+// quarantine, which a failed land discards, but in a quarantine of their own.
+func TestUserLand_proposalsFanOutDirectoryRemoved(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	cfg := testcfg.Build(t)
+	factory := gittest.NewFanOutRemovingCommandFactory(t, ctx, cfg)
+
+	dir, argv := resolverScript(t, "")
+	writeAnswer(t, dir, modelAnswer())
+	fx := newResolveFixtureOn(t, cfg, config.Graft{Land: config.GraftLand{Resolver: enabledResolver(argv)}},
+		[]gittest.TreeEntry{
+			{Mode: "100644", Path: "a", Content: "base\n"},
+			{Mode: "100644", Path: "b", Content: "base\n"},
+		},
+		[]gittest.TreeEntry{
+			{Mode: "100644", Path: "a", Content: "ours\n"},
+			{Mode: "100644", Path: "b", Content: "ours\n"},
+		},
+		[]gittest.TreeEntry{
+			{Mode: "100644", Path: "a", Content: "theirs\n"},
+			{Mode: "100644", Path: "b", Content: "theirs\n"},
+		},
+		testserver.WithGitCommandFactory(factory),
+	)
+	gittest.Exec(t, fx.cfg, "-C", fx.repoPath, "update-ref", "refs/heads/landed", fx.commit.String())
+	packWithoutFanOut(t, fx.cfg, fx.repoPath)
+
+	_, err := fx.client.UserLand(fx.ctx, fx.request("Land"))
+	requireMergeConflict(t, err)
+	pkg := landConflictDetail(err)
+	require.NotNil(t, pkg)
+
+	target := proposalRefTarget(t, fx)
+	require.NotEmpty(t, target, "the proposal reference exists")
+	for _, p := range []string{"a", "b"} {
+		require.Equal(t, "merged-"+p+"\n", string(gittest.Exec(t, fx.cfg, "-C", fx.repoPath, "cat-file", "blob", packageFile(t, pkg, p).GetProposal().GetOid())))
+	}
+	gittest.Exec(t, fx.cfg, "-C", fx.repoPath, "fsck", "--strict")
+}

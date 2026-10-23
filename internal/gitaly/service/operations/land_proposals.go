@@ -120,11 +120,13 @@ func landProposalExplanation(f resolver.ResponseFile, explanation string) string
 // landWriteProposals keeps the resolver's answer for the agent: the written contents as blobs, a
 // commit whose tree holds them by path (its parents the tip and the landed commit), and the
 // proposal reference of (branch, commit) pointing at it, replacing an older one. The objects are
-// written into the repository itself, not the quarantine of the land, which a failed land discards,
-// and the reference is updated through the reference transaction (and so the voter in
-// authoritative storage mode). It sets the proposal of every file of the listing and returns the
-// reference. The branch's older proposals are pruned after; a failed pruning is logged and
-// counted, and fails nothing.
+// written into a quarantine of their own, not the quarantine of the land, which a failed land
+// discards, and migrated into the repository before the reference update: a loose object written
+// straight into the repository would race housekeeping's removal of empty loose object
+// directories, which the migration survives. The reference is updated through the reference
+// transaction (and so the voter in authoritative storage mode). It sets the proposal of every
+// file of the listing and returns the reference. The branch's older proposals are pruned after; a
+// failed pruning is logged and counted, and fails nothing.
 func (s *Server) landWriteProposals(ctx context.Context, in *gitalypb.UserLandRequest, l landListing, answer *resolver.Response, committer git.Signature) (git.ReferenceName, error) {
 	// Who caused the proposals is in their commit, the trace of the reference: the update itself
 	// is the server's (landUpdateProposalRefs).
@@ -134,12 +136,17 @@ func (s *Server) landWriteProposals(ctx context.Context, in *gitalypb.UserLandRe
 	now := time.Now()
 	start := now
 	repo := s.localRepoFactory.Build(in.GetRepository())
+	quarantineDir, quarantineRepo, cleanup, err := s.quarantinedRepo(ctx, in.GetRepository())
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 	tree := &localrepo.TreeEntry{Type: localrepo.Tree, Mode: "040000"}
 	byPath := make(map[string]*gitalypb.LandConflictProposal, len(answer.Files))
 	for _, f := range answer.Files {
 		p := &gitalypb.LandConflictProposal{Action: f.Action, Resolver: answer.Resolver, Explanation: landProposalExplanation(f, answer.Explanation)}
 		if f.Action == resolver.ActionWrite {
-			blob, err := repo.WriteBlob(ctx, bytes.NewReader(f.Content), localrepo.WriteBlobConfig{Path: f.Path})
+			blob, err := quarantineRepo.WriteBlob(ctx, bytes.NewReader(f.Content), localrepo.WriteBlobConfig{Path: f.Path})
 			if err != nil {
 				return "", fmt.Errorf("writing the proposal of %q: %w", f.Path, err)
 			}
@@ -151,10 +158,10 @@ func (s *Server) landWriteProposals(ctx context.Context, in *gitalypb.UserLandRe
 		}
 		byPath[f.Path] = p
 	}
-	if err := tree.Write(ctx, repo); err != nil {
+	if err := tree.Write(ctx, quarantineRepo); err != nil {
 		return "", fmt.Errorf("writing the tree of the proposals: %w", err)
 	}
-	commit, err := repo.WriteCommit(ctx, localrepo.WriteCommitConfig{
+	commit, err := quarantineRepo.WriteCommit(ctx, localrepo.WriteCommitConfig{
 		TreeID:         tree.OID,
 		Message:        fmt.Sprintf("graft: proposals for landing %s onto %s\n\nResolver: %s\nRequested-By: %s\n", l.commitID, l.tip, landTrailerValueOrQuoted(answer.Resolver), landTrailerValueOrQuoted(actor)),
 		Parents:        []git.ObjectID{l.tip, l.commitID},
@@ -185,6 +192,9 @@ func (s *Server) landWriteProposals(ctx context.Context, in *gitalypb.UserLandRe
 	}
 	if oldOID == "" {
 		oldOID = objectHash.ZeroOID
+	}
+	if err := quarantineDir.Migrate(ctx); err != nil {
+		return "", fmt.Errorf("migrating the proposals: %w", err)
 	}
 	if err := proposals.Update(ctx, repo, []proposals.Op{{Name: ref, NewOID: commit, OldOID: oldOID}}); err != nil {
 		return "", err
