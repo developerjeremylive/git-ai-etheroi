@@ -144,7 +144,8 @@ func TestPolicyCheckAgainstChangesets(t *testing.T) {
 
 	t.Run("the updates the candidate would deny", func(t *testing.T) {
 		code, stdout, stderr := runPolicyCheck(append([]string{candidate, "-repo", env.relPath, "--json"}, server...)...)
-		require.Equal(t, exitOK, code, stderr)
+		require.Equal(t, exitError, code, "a candidate that would deny updates fails the check")
+		require.Equal(t, "graft policy: the candidate policy would deny 1 of the updates checked\n", stderr)
 		var res policyCheckResult
 		require.NoError(t, json.Unmarshal([]byte(stdout), &res))
 		require.Len(t, res.Repositories, 1)
@@ -161,14 +162,20 @@ func TestPolicyCheckAgainstChangesets(t *testing.T) {
 
 	t.Run("the text output", func(t *testing.T) {
 		code, stdout, stderr := runPolicyCheck(append([]string{candidate, "-repo", env.relPath}, server...)...)
-		require.Equal(t, exitOK, code, stderr)
+		require.Equal(t, exitError, code, stderr)
 		require.Contains(t, stdout, "1 updates the candidate would deny")
 		require.Contains(t, stdout, "  alice refs/heads/main (2 changesets, last ")
 	})
 
 	t.Run("--limit reads the last changesets", func(t *testing.T) {
 		code, stdout, stderr := runPolicyCheck(append([]string{candidate, "-repo", env.relPath, "--limit", "1", "--json"}, server...)...)
-		require.Equal(t, exitOK, code, stderr)
+		// The check fails exactly when the last changeset is one of alice's updates of main.
+		lastChangeset := all[len(all)-1]
+		wantCode := exitOK
+		if lastChangeset.Reference == "refs/heads/main" && lastChangeset.Actor == "alice" {
+			wantCode = exitError
+		}
+		require.Equal(t, wantCode, code, stderr)
 		var res policyCheckResult
 		require.NoError(t, json.Unmarshal([]byte(stdout), &res))
 		repo := res.Repositories[0]
