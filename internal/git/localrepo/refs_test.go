@@ -183,6 +183,111 @@ func TestRepo_GetReference(t *testing.T) {
 	}
 }
 
+// TestRepo_ResolveReferenceExactly checks that a reference resolves only by its exact name, to its
+// own value: a missing refs/heads/x never resolves through a reference that git's DWIM rules try
+// after it, nor through a reference below its name; a reference at an annotated tag resolves to the
+// tag, as rev-parse of the reference does; and a symbolic branch to the commit of its target.
+func TestRepo_ResolveReferenceExactly(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+
+	commit := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("main"))
+	other := gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("other"))
+	for _, ref := range []git.ReferenceName{
+		"refs/refs/heads/x", "refs/tags/refs/heads/x", "refs/heads/refs/heads/x", "refs/remotes/refs/heads/x", "refs/heads/x/y",
+	} {
+		gittest.WriteRef(t, cfg, repoPath, ref, other)
+	}
+	tag := gittest.WriteTag(t, cfg, repoPath, "annotated", commit.Revision(), gittest.WriteTagConfig{Message: "annotated"})
+	// git writes only commits to branches; another reference may hold the tag itself.
+	gittest.WriteRef(t, cfg, repoPath, "refs/keep/at-tag", tag)
+	gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "refs/heads/symbolic", "refs/heads/main")
+	// A branch whose object is missing still has its value.
+	broken := gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("broken"))
+	gittest.WriteRef(t, cfg, repoPath, "refs/heads/broken", broken)
+	require.NoError(t, os.Remove(filepath.Join(repoPath, "objects", broken.String()[:2], broken.String()[2:])))
+
+	for _, tc := range []struct {
+		reference   git.ReferenceName
+		expected    git.ObjectID
+		expectedErr error
+	}{
+		{reference: "refs/heads/main", expected: commit},
+		{reference: "refs/heads/x", expectedErr: git.ErrReferenceNotFound},
+		// Not reference names: never a pattern, never a revision.
+		{reference: "refs/heads/x*", expectedErr: git.ErrReferenceNotFound},
+		{reference: "refs/heads/main~1", expectedErr: git.ErrReferenceNotFound},
+		{reference: "refs/keep/at-tag", expected: tag},
+		{reference: "refs/heads/broken", expected: broken},
+		{reference: "refs/heads/symbolic", expected: commit},
+	} {
+		t.Run(tc.reference.String(), func(t *testing.T) {
+			oid, err := repo.ResolveReferenceExactly(ctx, tc.reference)
+			require.Equal(t, tc.expectedErr, err)
+			require.Equal(t, tc.expected, oid)
+		})
+	}
+}
+
+// TestRepo_GetDefaultBranchReadsCandidatesExactly checks that the candidates of the default branch
+// (HEAD's branch, main, master) are read by their exact names: a missing refs/heads/main is not the
+// default branch because git's DWIM rules would resolve it through a decoy, and the default branch
+// is then master.
+func TestRepo_GetDefaultBranchReadsCandidatesExactly(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+
+	for _, decoy := range []git.ReferenceName{
+		"refs/refs/heads/main", "refs/tags/refs/heads/main", "refs/heads/refs/heads/main", "refs/remotes/refs/heads/main",
+	} {
+		t.Run(decoy.String(), func(t *testing.T) {
+			t.Parallel()
+
+			cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+			gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main")
+			gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("master"))
+			gittest.WriteRef(t, cfg, repoPath, decoy, gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("decoy")))
+
+			defaultBranch, err := repo.GetDefaultBranch(ctx)
+			require.NoError(t, err)
+			require.Equal(t, git.LegacyDefaultRef, defaultBranch)
+		})
+	}
+
+	t.Run("HEAD's branch at a missing object", func(t *testing.T) {
+		t.Parallel()
+
+		// The branch exists, so it is the default branch, whatever it points to.
+		cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+		gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main")
+		broken := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("main"))
+		require.NoError(t, os.Remove(filepath.Join(repoPath, "objects", broken.String()[:2], broken.String()[2:])))
+
+		defaultBranch, err := repo.GetDefaultBranch(ctx)
+		require.NoError(t, err)
+		require.Equal(t, git.DefaultRef, defaultBranch)
+	})
+
+	t.Run("HEAD's branch a dangling symbolic reference", func(t *testing.T) {
+		t.Parallel()
+
+		// refs/heads/main points to a branch that does not exist: it has no value, so the
+		// default branch falls back to master, whatever decoy is named for main.
+		cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+		gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main")
+		gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "refs/heads/main", "refs/heads/nope")
+		master := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("master"))
+		gittest.WriteRef(t, cfg, repoPath, "refs/refs/heads/main", master)
+
+		defaultBranch, err := repo.GetDefaultBranch(ctx)
+		require.NoError(t, err)
+		require.Equal(t, git.LegacyDefaultRef, defaultBranch)
+	})
+}
+
 func TestRepo_GetReferenceWithAmbiguousRefs(t *testing.T) {
 	t.Parallel()
 

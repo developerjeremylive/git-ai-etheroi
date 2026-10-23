@@ -74,7 +74,9 @@ func (s *Server) UserMergeBranch(stream gitalypb.OperationService_UserMergeBranc
 				WithMetadata("old_object_id", expectedOldOID)
 		}
 	} else {
-		revision, err = quarantineRepo.ResolveRevision(ctx, referenceName.Revision())
+		// By its exact name: a missing branch must not resolve through a tag or another reference
+		// that git's DWIM rules would try after it.
+		revision, err = quarantineRepo.ResolveReferenceExactly(ctx, referenceName)
 		if err != nil {
 			if errors.Is(err, git.ErrReferenceNotFound) {
 				return structerr.NewNotFound("%w", err)

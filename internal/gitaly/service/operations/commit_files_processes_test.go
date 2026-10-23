@@ -15,9 +15,9 @@ import (
 
 // TestUserCommitFilesProcessCount counts the git processes of one UserCommitFiles request, by
 // subcommand (PLAN9, WP96): one cat-file for every read, one hash-object per blob, one hash-object
-// for every tree, commit-tree and update-ref, and one for-each-ref: the exact read of the branches
-// that resolved or, when none did (the orphan commit into an empty repository), the check for
-// branches. A process that comes back fails the test.
+// for every tree, commit-tree and update-ref, and one more for the branches: show-ref, the exact
+// read of the branch that resolved, or, when none did (the orphan commit into an empty repository),
+// for-each-ref, the check for branches. A process that comes back fails the test.
 func TestUserCommitFilesProcessCount(t *testing.T) {
 	t.Parallel()
 
@@ -32,29 +32,29 @@ func TestUserCommitFilesProcessCount(t *testing.T) {
 		{
 			desc:     "existing branch, top level",
 			paths:    []string{"file.txt"},
-			expected: map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "for-each-ref": 1, "update-ref": 1},
+			expected: map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "show-ref": 1, "update-ref": 1},
 		},
 		{
 			desc:     "existing branch, nested",
 			paths:    []string{"a/b/file.txt"},
-			expected: map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "for-each-ref": 1, "update-ref": 1},
+			expected: map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "show-ref": 1, "update-ref": 1},
 		},
 		{
 			desc:      "new branch, top level",
 			newBranch: true,
 			paths:     []string{"file.txt"},
-			expected:  map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "for-each-ref": 1, "update-ref": 1},
+			expected:  map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "show-ref": 1, "update-ref": 1},
 		},
 		{
 			desc:      "new branch, nested",
 			newBranch: true,
 			paths:     []string{"a/b/file.txt"},
-			expected:  map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "for-each-ref": 1, "update-ref": 1},
+			expected:  map[string]uint64{"cat-file": 1, "hash-object": 2, "commit-tree": 1, "show-ref": 1, "update-ref": 1},
 		},
 		{
 			desc:     "three files",
 			paths:    []string{"one.txt", "a/two.txt", "a/b/three.txt"},
-			expected: map[string]uint64{"cat-file": 1, "hash-object": 4, "commit-tree": 1, "for-each-ref": 1, "update-ref": 1},
+			expected: map[string]uint64{"cat-file": 1, "hash-object": 4, "commit-tree": 1, "show-ref": 1, "update-ref": 1},
 		},
 		{
 			desc:        "orphan commit into an empty repository",

@@ -146,7 +146,7 @@ func (s *Server) UserCherryPick(ctx context.Context, req *gitalypb.UserCherryPic
 				WithMetadata("old_object_id", expectedOldOID)
 		}
 	} else {
-		oldrev, err = quarantineRepo.ResolveRevision(ctx, referenceName.Revision()+"^{commit}")
+		oldrev, err = s.resolveBranchCommitExactly(ctx, quarantineRepo, referenceName)
 		if errors.Is(err, git.ErrReferenceNotFound) {
 			branchCreated = true
 			oldrev = objectHash.ZeroOID

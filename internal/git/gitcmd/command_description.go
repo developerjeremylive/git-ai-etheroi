@@ -295,6 +295,10 @@ var commandDescriptions = map[string]commandDescription{
 			}, hiddenReceivePackRefPrefixes(ctx)...), receiveFsckConfiguration(ctx)...), packConfiguration(ctx)...)
 		},
 	},
+	"reflog": {
+		// Only `reflog exists` is run, which reads the reflog of one reference.
+		flags: scNoRefUpdates,
+	},
 	"remote": {
 		// While git-remote(1)'s `add` subcommand does support `--end-of-options`,
 		// `remove` doesn't.

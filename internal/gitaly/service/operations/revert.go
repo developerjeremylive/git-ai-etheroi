@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/feder-cr/git-ai/internal/git"
-	"github.com/feder-cr/git-ai/internal/git/gitcmd"
 	"github.com/feder-cr/git-ai/internal/git/localrepo"
 	"github.com/feder-cr/git-ai/internal/git/remoterepo"
 	"github.com/feder-cr/git-ai/internal/gitaly/hook/updateref"
@@ -152,7 +152,7 @@ func (s *Server) UserRevert(ctx context.Context, req *gitalypb.UserRevertRequest
 				WithMetadata("old_object_id", expectedOldOID)
 		}
 	} else {
-		oldrev, err = quarantineRepo.ResolveRevision(ctx, referenceName.Revision()+"^{commit}")
+		oldrev, err = s.resolveBranchCommitExactly(ctx, quarantineRepo, referenceName)
 		if errors.Is(err, git.ErrReferenceNotFound) {
 			branchCreated = true
 			oldrev = objectHash.ZeroOID
@@ -206,6 +206,166 @@ func (s *Server) UserRevert(ctx context.Context, req *gitalypb.UserRevertRequest
 	}, nil
 }
 
+// resolveStartBranch resolves the start branch name of a request, a revision, to its commit, as
+// git resolves it with one deviation. objectHash is the object format of the repository the start
+// branch is read from; read returns the value of a reference there, read by its exact name
+// (git.ErrReferenceNotFound when it does not exist, a dangling symbolic reference included), and
+// resolve is git's resolution of a revision there.
+//
+// The revision is split into the name it starts with and its suffix (~1, ^{}, @{1}, :path). git
+// takes a full object ID (in either case) for the object; a root reference such as HEAD or
+// FETCH_HEAD, when it exists, from the repository's directory (git reads other upper-case files
+// there too, such as AUTO_MERGE, but a push cannot write them); and any other name x by its DWIM
+// rules, the first that exists of refs/x, refs/tags/x, refs/heads/x, refs/remotes/x and
+// refs/remotes/x/HEAD. The one deviation: when that is a reference with the same name as the
+// branch, the tag refs/tags/x or refs/x, and the branch refs/heads/x exists, the branch is taken. An
+// existing branch of the exact name beats a non-branch reference of the same name, such as a tag an
+// agent pushed to shadow it. A name that starts with a namespace git itself prefixes (heads/, tags/,
+// remotes/) names it, and follows git, as everything else does. When no reference is named x,
+// git's resolution answers, by design: an abbreviated SHA or another revision keeps working as a
+// start point, as before. A full reference name (refs/...) is read exactly as given, with no
+// fallback: a missing refs/heads/x does not resolve through refs/refs/heads/x or another decoy.
+//
+// The chosen reference is read once, to its value, and the suffix applies to that object ID: no
+// rule resolves the name again, so a reference that is dangling, or that goes away meanwhile, never
+// yields a decoy. A reflog suffix (@{n}) needs the name: the reference must have a reflog of its
+// own (reflogExists), since git would otherwise read the reflog of a decoy such as
+// refs/refs/heads/x; it is then resolved by the full name, and the reference must still have the
+// value read, else the request fails with errStartReferenceChanged, which a retry may not meet.
+func resolveStartBranch(
+	name string,
+	objectHash git.ObjectHash,
+	read func(git.ReferenceName) (git.ObjectID, error),
+	reflogExists func(git.ReferenceName) (bool, error),
+	resolve func(git.Revision) (git.ObjectID, error),
+) (git.ObjectID, error) {
+	base, suffix := splitRevisionSuffix(name)
+	// A revision that starts with its suffix (@{-1}, :path) names no reference.
+	if base == "" || isFullObjectID(base, objectHash) {
+		return resolve(git.Revision(name + "^{commit}"))
+	}
+
+	reference, value, err := startReference(base, read)
+	switch {
+	case err != nil:
+		return "", err
+	case reference == "" && strings.HasPrefix(base, "refs/"):
+		return "", git.ErrReferenceNotFound
+	case reference == "":
+		return resolve(git.Revision(name + "^{commit}"))
+	case !strings.Contains(suffix, "@{"):
+		return resolve(git.Revision(value.String() + suffix + "^{commit}"))
+	}
+
+	hasReflog, err := reflogExists(reference)
+	if err != nil {
+		return "", err
+	}
+	if !hasReflog {
+		return "", fmt.Errorf("reference %q has no reflog: %w", reference, git.ErrReferenceNotFound)
+	}
+	commit, err := resolve(git.Revision(reference.String() + suffix + "^{commit}"))
+	if err != nil {
+		return "", err
+	}
+	if again, err := read(reference); err != nil || again != value {
+		return "", fmt.Errorf("reference %q: %w", reference, errStartReferenceChanged)
+	}
+	return commit, nil
+}
+
+// errStartReferenceChanged is the error of a start reference that changed while its reflog was read.
+var errStartReferenceChanged = errors.New("the reference changed while its reflog was read")
+
+// startRefError returns the error of a start branch that resolveStartBranch failed to resolve: a
+// start reference that changed meanwhile is a failed precondition, which a retry may not meet, and
+// anything else an invalid argument.
+func startRefError(err error) error {
+	if errors.Is(err, errStartReferenceChanged) {
+		return structerr.NewFailedPrecondition("resolve start ref: %w", err)
+	}
+	return structerr.NewInvalidArgument("resolve start ref: %w", err)
+}
+
+// startReference returns the reference that git resolves the name to, with the deviation of
+// resolveStartBranch, and its value; an empty name when there is none.
+func startReference(name string, read func(git.ReferenceName) (git.ObjectID, error)) (git.ReferenceName, git.ObjectID, error) {
+	if strings.HasPrefix(name, "refs/") {
+		value, err := read(git.ReferenceName(name))
+		if errors.Is(err, git.ErrReferenceNotFound) {
+			return "", "", nil
+		}
+		return git.ReferenceName(name), value, err
+	}
+
+	branch := git.ReferenceName("refs/heads/" + name)
+	other := git.ReferenceName("refs/" + name)
+	tag := git.ReferenceName("refs/tags/" + name)
+	candidates := []git.ReferenceName{other, tag, branch, git.ReferenceName("refs/remotes/" + name), git.ReferenceName("refs/remotes/" + name + "/HEAD")}
+	if isRootReference(name) {
+		candidates = append([]git.ReferenceName{git.ReferenceName(name)}, candidates...)
+	}
+	namesNamespace := strings.HasPrefix(name, "heads/") || strings.HasPrefix(name, "tags/") || strings.HasPrefix(name, "remotes/")
+
+	for _, candidate := range candidates {
+		value, err := read(candidate)
+		if errors.Is(err, git.ErrReferenceNotFound) {
+			continue
+		}
+		if err != nil {
+			return "", "", err
+		}
+		if !namesNamespace && (candidate == other || candidate == tag) {
+			branchValue, err := read(branch)
+			if err == nil {
+				return branch, branchValue, nil
+			}
+			if !errors.Is(err, git.ErrReferenceNotFound) {
+				return "", "", err
+			}
+		}
+		return candidate, value, nil
+	}
+	return "", "", nil
+}
+
+// isRootReference reports whether name has the syntax of a root reference, which git reads from
+// the repository's directory before any DWIM rule when it exists: HEAD, or upper-case letters and
+// underscores ending in _HEAD (FETCH_HEAD, ORIG_HEAD, MERGE_HEAD, ...).
+func isRootReference(name string) bool {
+	if name == "HEAD" {
+		return true
+	}
+	if !strings.HasSuffix(name, "_HEAD") {
+		return false
+	}
+	for _, c := range name {
+		if (c < 'A' || c > 'Z') && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// isFullObjectID reports whether name is a full object ID of objectHash's format, in either case,
+// which git takes for the object.
+func isFullObjectID(name string, objectHash git.ObjectHash) bool {
+	return objectHash.ValidateHex(strings.ToLower(name)) == nil
+}
+
+// splitRevisionSuffix splits a revision into the name it starts with and the suffix that applies to
+// it (~<n>, ^<n>, ^{<type>}, @{<n>}, :<path>). A reference name never holds ~, ^, : or @{ (git
+// check-ref-format), so the name ends at the first of them.
+func splitRevisionSuffix(revision string) (string, string) {
+	end := len(revision)
+	for _, marker := range []string{"~", "^", ":", "@{"} {
+		if i := strings.Index(revision, marker); i >= 0 && i < end {
+			end = i
+		}
+	}
+	return revision[:end], revision[end:]
+}
+
 type requestFetchingStartRevision interface {
 	GetBranchName() []byte
 	GetStartRepository() *gitalypb.Repository
@@ -222,18 +382,43 @@ func (s *Server) fetchStartRevision(
 		startBranchName = req.GetBranchName()
 	}
 
-	var remoteRepo gitcmd.Repository = localRepo
+	// The start branch is read in the start repository, or in the local one without it.
+	objectHashOf := localRepo.ObjectHash
+	read := func(name git.ReferenceName) (git.ObjectID, error) {
+		return localRepo.ResolveReferenceExactly(ctx, name)
+	}
+	reflogExists := func(name git.ReferenceName) (bool, error) {
+		return localRepo.ReflogExists(ctx, name)
+	}
+	resolve := func(revision git.Revision) (git.ObjectID, error) {
+		return localRepo.ResolveRevision(ctx, revision)
+	}
 	if startRepository := req.GetStartRepository(); startRepository != nil {
-		var err error
-		remoteRepo, err = remoterepo.New(ctx, startRepository, s.conns)
+		remoteRepo, err := remoterepo.New(ctx, startRepository, s.conns)
 		if err != nil {
 			return "", structerr.NewInternal("%w", err)
 		}
+		objectHashOf = remoteRepo.ObjectHash
+		read = func(name git.ReferenceName) (git.ObjectID, error) {
+			return remoteRepo.ReadReference(ctx, name)
+		}
+		// No RPC tells whether a reference of the start repository has a reflog of its own, so a
+		// reflog entry of one is not taken there: git could read a decoy's reflog for it.
+		reflogExists = func(git.ReferenceName) (bool, error) {
+			return false, nil
+		}
+		resolve = func(revision git.Revision) (git.ObjectID, error) {
+			return remoteRepo.ResolveRevision(ctx, revision)
+		}
+	}
+	objectHash, err := objectHashOf(ctx)
+	if err != nil {
+		return "", structerr.NewInternal("detecting object hash: %w", err)
 	}
 
-	startRevision, err := remoteRepo.ResolveRevision(ctx, git.Revision(fmt.Sprintf("%s^{commit}", startBranchName)))
+	startRevision, err := resolveStartBranch(string(startBranchName), objectHash, read, reflogExists, resolve)
 	if err != nil {
-		return "", structerr.NewInvalidArgument("resolve start ref: %w", err)
+		return "", startRefError(err)
 	}
 
 	if req.GetStartRepository() == nil {

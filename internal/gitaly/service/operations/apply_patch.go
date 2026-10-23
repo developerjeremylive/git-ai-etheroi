@@ -70,7 +70,9 @@ func (s *Server) userApplyPatch(ctx context.Context, header *gitalypb.UserApplyP
 		return fmt.Errorf("detecting object hash: %w", err)
 	}
 
-	parentCommitID, err := repo.ResolveRevision(ctx, targetBranch.Revision()+"^{commit}")
+	// The branches are read by their exact names: a missing branch must not resolve through a tag
+	// or another reference that git's DWIM rules would try after it.
+	parentCommitID, err := s.resolveBranchCommitExactly(ctx, repo, targetBranch)
 	if err != nil {
 		if !errors.Is(err, git.ErrReferenceNotFound) {
 			return fmt.Errorf("resolve target branch: %w", err)
@@ -80,8 +82,12 @@ func (s *Server) userApplyPatch(ctx context.Context, header *gitalypb.UserApplyP
 		if err != nil {
 			return fmt.Errorf("default branch name: %w", err)
 		}
+		// A repository without a branch has no default branch.
+		if defaultBranch == "" {
+			return errNoDefaultBranch
+		}
 
-		parentCommitID, err = repo.ResolveRevision(ctx, defaultBranch.Revision()+"^{commit}")
+		parentCommitID, err = s.resolveBranchCommitExactly(ctx, repo, defaultBranch)
 		if errors.Is(err, git.ErrReferenceNotFound) {
 			return errNoDefaultBranch
 		} else if err != nil {
