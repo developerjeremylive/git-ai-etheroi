@@ -143,7 +143,7 @@ func startExampleUnbatched(t *testing.T) gitalyStack {
 // startGitaly starts a standalone Gitaly with every service registered and
 // creates an empty repository on it. The shared token authorizes the setup
 // calls of the test helpers.
-func startGitaly(t *testing.T, graft config.Graft, sharedToken string) gitalyStack {
+func startGitaly(t *testing.T, graft config.Graft, sharedToken string, opts ...testserver.GitalyServerOpt) gitalyStack {
 	t.Helper()
 
 	ctx := featureflag.OutgoingCtxWithFeatureFlag(testhelper.Context(t), featureflag.GPGSigning, false)
@@ -155,9 +155,9 @@ func startGitaly(t *testing.T, graft config.Graft, sharedToken string) gitalySta
 	testcfg.BuildGitalySSH(t, cfg)
 	testcfg.BuildGitalyHooks(t, cfg)
 
-	addr := testserver.RunGitalyServer(t, cfg, setup.RegisterAll,
+	addr := testserver.RunGitalyServer(t, cfg, setup.RegisterAll, append([]testserver.GitalyServerOpt{
 		testserver.WithGitLabClient(gitlab.NewStandaloneClient(cfg.Graft, testhelper.SharedLogger(t))),
-	)
+	}, opts...)...)
 	cfg.SocketPath = addr
 
 	// Only the setup call carries gitaly-servers metadata. The context of the

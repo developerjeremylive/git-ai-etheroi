@@ -13,6 +13,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/featureflag"
 	"github.com/feder-cr/git-ai/internal/git/gittest"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
+	"github.com/feder-cr/git-ai/internal/testhelper/testserver"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
 )
 
@@ -20,7 +21,7 @@ import (
 // opened to agents through [graft] agent_rpcs, the operator opt-in of
 // AGENT-SECURITY.md, and a policy that also lets the builder update
 // refs/graft/**, so that only the reservation of that namespace can refuse it.
-func startWithAgentPushes(t *testing.T) gitalyStack {
+func startWithAgentPushes(t *testing.T, opts ...testserver.GitalyServerOpt) gitalyStack {
 	t.Helper()
 
 	ex := loadExample(t)
@@ -29,7 +30,7 @@ func startWithAgentPushes(t *testing.T) gitalyStack {
 		{Actor: "builder", Refs: []string{"refs/graft/**"}, Allow: true},
 	}, ex.graft.Policy...)
 
-	return startGitaly(t, ex.graft, ex.sharedToken)
+	return startGitaly(t, ex.graft, ex.sharedToken, opts...)
 }
 
 // agentPush pushes refspec from the client repository at clientPath to the
