@@ -101,6 +101,46 @@ func TestMigrateRecreatesTargetDirectoriesThatVanish(t *testing.T) {
 	require.NoDirExists(t, source)
 }
 
+// TestMigrateRecreatesTargetDirectoriesThatVanishAgain removes each target fan-out directory before
+// the first three links into it, so it vanishes again after the migration created it again, as
+// git prune-packed may each time between the mkdir and the link. git's own writer retries only
+// once after its mkdir (create_tmpfile), which a second removal defeats; the migration keeps
+// creating the directory until the link holds.
+func TestMigrateRecreatesTargetDirectoriesThatVanishAgain(t *testing.T) {
+	ctx := testhelper.Context(t)
+	root := t.TempDir()
+	source, target := filepath.Join(root, "quarantine"), filepath.Join(root, "objects")
+	fanouts := []string{"0a", "1b"}
+	files := writeQuarantine(t, source, fanouts)
+	require.NoError(t, os.MkdirAll(filepath.Join(target, "pack"), 0o755))
+
+	const removals = 3
+	var mu sync.Mutex
+	removedTimes := map[string]int{}
+	replaceHooks(t, func(targetPath string) {
+		dir := filepath.Dir(targetPath)
+		if filepath.Base(dir) == "pack" {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if removedTimes[dir] < removals {
+			removedTimes[dir]++
+			require.NoError(t, os.Remove(dir))
+		}
+	})
+
+	require.NoError(t, migrate(ctx, source, target, false))
+
+	for _, file := range files {
+		require.FileExists(t, filepath.Join(target, file))
+	}
+	for _, fanout := range fanouts {
+		require.Equal(t, removals, removedTimes[filepath.Join(target, fanout)], fanout)
+	}
+	require.NoDirExists(t, source)
+}
+
 // TestMigrateSyncsTheDirectoryThatHoldsTheLink removes each target fan-out directory right before
 // the first link into it and creates it again, as housekeeping and then another writer may. The
 // link then succeeds into the new directory. The second pass must fsync that directory, not the
