@@ -52,6 +52,18 @@ func (p inlineProbe) resolve(ctx context.Context, t *testing.T, pre *landPreReso
 	return p.s.landResolveInline(ctx, p.fx.request("Land"), p.fx.tip, p.fx.commit, p.l, pre)
 }
 
+// countInlineCalls counts the inline calls of the lane (land_inline.go) where it makes them. A test that cuts a
+// call with a real timeout must not count them in the log of the resolver: the log is written once the
+// resolver's process has started, which a loaded machine does after the timeout has cut the call.
+func countInlineCalls(s *Server) *atomic.Int32 {
+	var calls atomic.Int32
+	s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
+		calls.Add(1)
+		return context.WithTimeout(ctx, allowed)
+	}
+	return &calls
+}
+
 // TestLandResolveInline_aReplyThatIsNotTheRulesIsRejected: a resolver that echoes rules_only but answers with
 // a model's file, a file that says nothing of its origin, or a file it holds, is not taken: the member goes out
 // of the lane as one the rules cannot resolve, and nothing of the reply is kept. The guard is the lane's own;
@@ -120,13 +132,7 @@ func TestLandResolveInline_aBatchLosesAtMostItsBudget(t *testing.T) {
 	budget := &landInlineBudget{}
 	ctx := withLandInlineBudget(p.fx.ctx, budget)
 
-	// The calls are counted where the lane makes them, not in the log of the resolver, which a loaded machine
-	// writes only once its process has started, after the 300 ms may have cut the call.
-	var calls atomic.Int32
-	p.s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
-		calls.Add(1)
-		return context.WithTimeout(ctx, allowed)
-	}
+	calls := countInlineCalls(p.s)
 
 	for i := 0; i < members; i++ {
 		require.Equal(t, landInlineSlow, p.resolve(ctx, t, newLandPreResolution()), "member %d", i+1)
@@ -416,6 +422,7 @@ func TestUserLand_aLaneRoundThatHandsBackTakesNoTicket(t *testing.T) {
 		defer mu.Unlock()
 		held = append(held, landTickets.keysOf(q.scope))
 	}
+	calls := countInlineCalls(s)
 	_, err := q.land(q.onA[0])
 	require.NoError(t, err)
 
@@ -425,7 +432,7 @@ func TestUserLand_aLaneRoundThatHandsBackTakesNoTicket(t *testing.T) {
 	for round, keys := range held {
 		require.Empty(t, keys, "ticket held at the lane round %d", round+1)
 	}
-	require.Positive(t, inlineCalls(t, q.dir))
+	require.Positive(t, calls.Load(), "the lane tried")
 }
 
 // TestUserLand_withNoInlineSlotAllTheLandsStillLand: every slot of the lane is taken (by calls in flight for other
