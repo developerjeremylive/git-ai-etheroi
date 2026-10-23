@@ -217,26 +217,6 @@ func badReferenceValue(stderr string, reference git.ReferenceName) (git.ObjectID
 	return git.ObjectID(value), true
 }
 
-// ReferenceExists reports whether reference exists under its exact name, with `git show-ref
-// --exists`: no DWIM rule, whatever its value points to (an object that is missing included). A
-// name that is not a valid reference name does not exist.
-func (repo *Repo) ReferenceExists(ctx context.Context, reference git.ReferenceName) (bool, error) {
-	var stderr bytes.Buffer
-	err := repo.ExecAndWait(ctx, gitcmd.Command{
-		Name:  "show-ref",
-		Flags: []gitcmd.Option{gitcmd.Flag{Name: "--exists"}},
-		Args:  []string{reference.String()},
-	}, gitcmd.WithStderr(&stderr))
-	if err == nil {
-		return true, nil
-	}
-	// show-ref --exists exits 2 for a reference that does not exist.
-	if code, ok := command.ExitStatus(err); ok && code == 2 {
-		return false, nil
-	}
-	return false, fmt.Errorf("show-ref --exists %q: %w, stderr: %q", reference, err, stderr.String())
-}
-
 // GetReference looks up and returns the given reference. Returns a
 // ReferenceNotFound error if the reference was not found.
 func (repo *Repo) GetReference(ctx context.Context, reference git.ReferenceName) (git.Reference, error) {
@@ -470,17 +450,19 @@ func (repo *Repo) GetDefaultBranch(ctx context.Context) (git.ReferenceName, erro
 	// candidate is read by its exact name: with its DWIM rules, git would take a
 	// missing refs/heads/main for one of refs/refs/heads/main,
 	// refs/tags/refs/heads/main, refs/heads/refs/heads/main or
-	// refs/remotes/refs/heads/main.
+	// refs/remotes/refs/heads/main. A candidate counts when it has a value: a
+	// branch whose object is missing does, a dangling symbolic reference does
+	// not.
 	for _, headCandidate := range []git.ReferenceName{
 		headReference, git.DefaultRef, git.LegacyDefaultRef,
 	} {
-		exists, err := repo.ReferenceExists(ctx, headCandidate)
-		if err != nil {
+		if _, err := repo.ResolveReferenceExactly(ctx, headCandidate); err != nil {
+			if errors.Is(err, git.ErrReferenceNotFound) {
+				continue
+			}
 			return "", err
 		}
-		if exists {
-			return headCandidate, nil
-		}
+		return headCandidate, nil
 	}
 
 	// If all else fails, return the first branch name

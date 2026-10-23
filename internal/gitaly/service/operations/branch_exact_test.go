@@ -731,7 +731,21 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 		desc  string
 		start func(setup cherryPickOrRevertSetup) string
 		decoy func(setup cherryPickOrRevertSetup) git.ReferenceName
+		// branch, when set, is a branch at base that the start names.
+		branch string
 	}{
+		{
+			desc:   "feature/login with refs/feature/login",
+			start:  func(cherryPickOrRevertSetup) string { return "feature/login" },
+			decoy:  func(cherryPickOrRevertSetup) git.ReferenceName { return "refs/feature/login" },
+			branch: "feature/login",
+		},
+		{
+			desc:   "a branch ORIG_HEAD with a tag ORIG_HEAD",
+			start:  func(cherryPickOrRevertSetup) string { return "ORIG_HEAD" },
+			decoy:  func(cherryPickOrRevertSetup) git.ReferenceName { return "refs/tags/ORIG_HEAD" },
+			branch: "ORIG_HEAD",
+		},
 		{
 			desc:  "HEAD with a branch named HEAD",
 			start: func(cherryPickOrRevertSetup) string { return "HEAD" },
@@ -779,6 +793,9 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 			t.Parallel()
 
 			setup := setupCherryPickOrRevert(t, ctx, cfg)
+			if tc.branch != "" {
+				gittest.WriteRef(t, cfg, setup.repoPath, git.NewReferenceNameFromBranchName(tc.branch), setup.base)
+			}
 			if decoy := tc.decoy(setup); decoy != "" {
 				writeDecoy(t, cfg, setup.repoPath, decoy, baseFile)
 			}
@@ -788,6 +805,42 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 			require.Equal(t, setup.base.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
 		})
 	}
+
+	t.Run("cherry-pick, a dangling symbolic branch by its full name", func(t *testing.T) {
+		t.Parallel()
+
+		// refs/heads/x points to a branch that does not exist: it has no value, and never resolves
+		// through the decoy refs/refs/heads/x that git's rules would try after it.
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		gittest.Exec(t, cfg, "-C", setup.repoPath, "symbolic-ref", "refs/heads/x", "refs/heads/nope")
+		writeDecoy(t, cfg, setup.repoPath, "refs/refs/heads/x", baseFile)
+
+		_, err := cherryPick(setup, "refs/heads/x")
+		testhelper.RequireGrpcCode(t, err, codes.InvalidArgument)
+		require.ErrorContains(t, err, "resolve start ref")
+	})
+
+	t.Run("rebase onto a remote branch with refs/<branch>", func(t *testing.T) {
+		t.Parallel()
+
+		setup := setupRebasableRepositories(t, ctx, cfg, true)
+		writeDecoy(t, cfg, setup.remoteRepoPath, git.ReferenceName("refs/"+setup.remoteBranch))
+
+		stream, err := client.UserRebaseConfirmable(ctx)
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableHeaderRequest(setup.localRepo, gittest.TestUser, "1",
+			setup.localBranch, setup.localCommit, setup.remoteRepo, setup.remoteBranch)))
+		first, err := stream.Recv()
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(buildUserRebaseConfirmableApplyRequest(true)))
+		_, err = stream.Recv()
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		require.Equal(t, io.EOF, err)
+
+		require.Equal(t, setup.remoteCommit.String(), parentsOf(t, cfg, setup.localRepoPath, first.GetRebaseSha()),
+			"the remote branch beats refs/<branch> of the same name")
+	})
 
 	t.Run("cherry-pick, main:base, a blob, fails", func(t *testing.T) {
 		t.Parallel()
@@ -821,11 +874,12 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 	})
 }
 
-// TestResolveStartBranch checks the rule of resolveStartBranch over lookups of a fake repository:
-// git's resolution, but an existing branch of the exact name beats refs/x and refs/tags/x. resolve
-// answers the revision it is given, so the expected value is the revision git is asked for; a name
-// that git reads before any reference (an object ID, a root reference, a revision without a name)
-// is never looked up.
+// TestResolveStartBranch checks the rule of resolveStartBranch over a fake repository: git's
+// resolution, but an existing branch of the exact name beats a reference with the same name
+// (refs/tags/x, refs/x), unless the name starts with a namespace git prefixes. read answers v(ref)
+// for every reference that exists, and resolve answers the revision it is given, so the expected
+// value is the revision git is asked for: the value read, with the suffix. A name that git reads
+// before any reference (an object ID, a revision without a name) is never looked up.
 func TestResolveStartBranch(t *testing.T) {
 	t.Parallel()
 
@@ -837,34 +891,43 @@ func TestResolveStartBranch(t *testing.T) {
 		// noLookup tells that the name must not be looked up as a reference.
 		noLookup bool
 	}{
-		{name: "main", refs: []string{"refs/heads/main"}, expected: "refs/heads/main^{commit}"},
-		{name: "main", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "refs/heads/main^{commit}"},
-		{name: "main", refs: []string{"refs/main", "refs/heads/main"}, expected: "refs/heads/main^{commit}"},
-		{name: "main", refs: []string{"refs/tags/main"}, expected: "refs/tags/main^{commit}"},
-		{name: "main", refs: []string{"refs/main"}, expected: "refs/main^{commit}"},
-		{name: "main", refs: []string{"refs/heads/main", "refs/remotes/main"}, expected: "refs/heads/main^{commit}"},
-		{name: "heads/main", refs: []string{"refs/heads/main", "refs/heads/heads/main"}, expected: "refs/heads/main^{commit}"},
-		{name: "tags/v1", refs: []string{"refs/tags/v1"}, expected: "refs/tags/v1^{commit}"},
-		// A name that names its namespace follows git, whatever branch has that name.
-		{name: "tags/v1", refs: []string{"refs/tags/v1", "refs/heads/tags/v1"}, expected: "refs/tags/v1^{commit}"},
+		{name: "main", refs: []string{"refs/heads/main"}, expected: "v(refs/heads/main)^{commit}"},
+		{name: "main", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "v(refs/heads/main)^{commit}"},
+		{name: "main", refs: []string{"refs/main", "refs/heads/main"}, expected: "v(refs/heads/main)^{commit}"},
+		{name: "main", refs: []string{"refs/tags/main"}, expected: "v(refs/tags/main)^{commit}"},
+		{name: "main", refs: []string{"refs/main"}, expected: "v(refs/main)^{commit}"},
+		{name: "main", refs: []string{"refs/heads/main", "refs/remotes/main"}, expected: "v(refs/heads/main)^{commit}"},
+		// A branch with a slash beats a reference with the same name too.
+		{name: "feature/login", refs: []string{"refs/feature/login", "refs/heads/feature/login"}, expected: "v(refs/heads/feature/login)^{commit}"},
+		{name: "a/b", refs: []string{"refs/a/b", "refs/heads/a/b"}, expected: "v(refs/heads/a/b)^{commit}"},
+		{name: "a/b", refs: []string{"refs/tags/a/b", "refs/heads/a/b"}, expected: "v(refs/heads/a/b)^{commit}"},
+		{name: "a/b", refs: []string{"refs/a/b"}, expected: "v(refs/a/b)^{commit}"},
+		// A name that starts with a namespace git prefixes names it, and follows git.
+		{name: "heads/main", refs: []string{"refs/heads/main", "refs/heads/heads/main"}, expected: "v(refs/heads/main)^{commit}"},
+		{name: "tags/v1", refs: []string{"refs/tags/v1"}, expected: "v(refs/tags/v1)^{commit}"},
+		{name: "tags/v1", refs: []string{"refs/tags/v1", "refs/heads/tags/v1"}, expected: "v(refs/tags/v1)^{commit}"},
 		{
 			name:     "remotes/origin/main",
 			refs:     []string{"refs/remotes/origin/main", "refs/heads/remotes/origin/main"},
-			expected: "refs/remotes/origin/main^{commit}",
+			expected: "v(refs/remotes/origin/main)^{commit}",
 		},
-		{name: "a/b", refs: []string{"refs/a/b", "refs/heads/a/b"}, expected: "refs/a/b^{commit}"},
-		// A tag of the same name is beaten by the branch, with or without a namespace in the name.
-		{name: "a/b", refs: []string{"refs/tags/a/b", "refs/heads/a/b"}, expected: "refs/heads/a/b^{commit}"},
-		{name: "origin/x", refs: []string{"refs/remotes/origin/x"}, expected: "refs/remotes/origin/x^{commit}"},
-		{name: "origin", refs: []string{"refs/remotes/origin/HEAD"}, expected: "refs/remotes/origin/HEAD^{commit}"},
-		{name: "main~1", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "refs/heads/main~1^{commit}"},
-		{name: "main:file", refs: []string{"refs/heads/main"}, expected: "refs/heads/main:file^{commit}"},
-		{name: "refs/tags/v1^{}", refs: []string{"refs/tags/v1"}, expected: "refs/tags/v1^{}^{commit}"},
+		{name: "origin/x", refs: []string{"refs/remotes/origin/x"}, expected: "v(refs/remotes/origin/x)^{commit}"},
+		{name: "origin", refs: []string{"refs/remotes/origin/HEAD"}, expected: "v(refs/remotes/origin/HEAD)^{commit}"},
+		// The suffix applies to the value read.
+		{name: "main~1", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "v(refs/heads/main)~1^{commit}"},
+		{name: "main:file", refs: []string{"refs/heads/main"}, expected: "v(refs/heads/main):file^{commit}"},
+		{name: "refs/tags/v1^{}", refs: []string{"refs/tags/v1"}, expected: "v(refs/tags/v1)^{}^{commit}"},
+		// A reflog suffix needs the name, which is read again afterwards.
+		{name: "main@{1}", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "refs/heads/main@{1}^{commit}"},
 		{name: "refs/heads/x", refs: []string{"refs/refs/heads/x"}, expected: "not found"},
 		{name: "abc1234", expected: "abc1234^{commit}"},
 		{name: "@", expected: "@^{commit}"},
-		{name: "HEAD", refs: []string{"refs/heads/HEAD"}, expected: "HEAD^{commit}", noLookup: true},
-		{name: "FETCH_HEAD~1", refs: []string{"refs/heads/FETCH_HEAD"}, expected: "FETCH_HEAD~1^{commit}", noLookup: true},
+		// A root reference that exists comes first; one that does not, such as a dangling HEAD, follows
+		// the rules of a bare name.
+		{name: "HEAD", refs: []string{"HEAD", "refs/heads/HEAD"}, expected: "v(HEAD)^{commit}"},
+		{name: "HEAD", refs: []string{"refs/heads/HEAD"}, expected: "v(refs/heads/HEAD)^{commit}"},
+		{name: "FETCH_HEAD~1", refs: []string{"FETCH_HEAD", "refs/heads/FETCH_HEAD"}, expected: "v(FETCH_HEAD)~1^{commit}"},
+		{name: "ORIG_HEAD", refs: []string{"refs/tags/ORIG_HEAD", "refs/heads/ORIG_HEAD"}, expected: "v(refs/heads/ORIG_HEAD)^{commit}"},
 		{name: sha, refs: []string{"refs/heads/" + sha}, expected: sha + "^{commit}", noLookup: true},
 		{name: strings.ToUpper(sha), refs: []string{"refs/heads/" + strings.ToUpper(sha)}, expected: strings.ToUpper(sha) + "^{commit}", noLookup: true},
 		{name: sha + "~0", refs: []string{"refs/heads/" + sha}, expected: sha + "~0^{commit}", noLookup: true},
@@ -878,15 +941,18 @@ func TestResolveStartBranch(t *testing.T) {
 				refs[git.ReferenceName(ref)] = true
 			}
 			var lookups []git.ReferenceName
-			exists := func(name git.ReferenceName) (bool, error) {
+			read := func(name git.ReferenceName) (git.ObjectID, error) {
 				lookups = append(lookups, name)
-				return refs[name], nil
+				if !refs[name] {
+					return "", git.ErrReferenceNotFound
+				}
+				return git.ObjectID("v(" + name + ")"), nil
 			}
 			resolve := func(revision git.Revision) (git.ObjectID, error) {
 				return git.ObjectID(revision), nil
 			}
 
-			resolved, err := resolveStartBranch(tc.name, git.ObjectHashSHA1, exists, resolve)
+			resolved, err := resolveStartBranch(tc.name, git.ObjectHashSHA1, read, resolve)
 			if tc.expected == "not found" {
 				require.ErrorIs(t, err, git.ErrReferenceNotFound)
 			} else {
@@ -898,6 +964,23 @@ func TestResolveStartBranch(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a reference that changes while its reflog is read", func(t *testing.T) {
+		reads := 0
+		read := func(name git.ReferenceName) (git.ObjectID, error) {
+			if name != "refs/heads/main" {
+				return "", git.ErrReferenceNotFound
+			}
+			reads++
+			return git.ObjectID(fmt.Sprintf("v%d", reads)), nil
+		}
+		resolve := func(revision git.Revision) (git.ObjectID, error) {
+			return git.ObjectID(revision), nil
+		}
+
+		_, err := resolveStartBranch("main@{1}", git.ObjectHashSHA1, read, resolve)
+		require.ErrorContains(t, err, "changed while its reflog was read")
+	})
 }
 
 // TestSplitRevisionSuffix checks the split of a start revision into its name and its suffix.

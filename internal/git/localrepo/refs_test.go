@@ -270,34 +270,22 @@ func TestRepo_GetDefaultBranchReadsCandidatesExactly(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, git.DefaultRef, defaultBranch)
 	})
-}
 
-// TestRepo_ReferenceExists checks that a reference exists only under its exact name, whatever it
-// points to, and that a name that is not a reference name does not exist.
-func TestRepo_ReferenceExists(t *testing.T) {
-	t.Parallel()
+	t.Run("HEAD's branch a dangling symbolic reference", func(t *testing.T) {
+		t.Parallel()
 
-	ctx := testhelper.Context(t)
-	cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+		// refs/heads/main points to a branch that does not exist: it has no value, so the
+		// default branch falls back to master, whatever decoy is named for main.
+		cfg, repo, repoPath := setupRepo(t, withDisabledHooks())
+		gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main")
+		gittest.Exec(t, cfg, "-C", repoPath, "symbolic-ref", "refs/heads/main", "refs/heads/nope")
+		master := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("master"))
+		gittest.WriteRef(t, cfg, repoPath, "refs/refs/heads/main", master)
 
-	commit := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("main"))
-	gittest.WriteRef(t, cfg, repoPath, "refs/tags/refs/heads/x", commit)
-	gittest.WriteRef(t, cfg, repoPath, "refs/heads/x/y", commit)
-	broken := gittest.WriteCommit(t, cfg, repoPath, gittest.WithMessage("broken"))
-	gittest.WriteRef(t, cfg, repoPath, "refs/heads/broken", broken)
-	require.NoError(t, os.Remove(filepath.Join(repoPath, "objects", broken.String()[:2], broken.String()[2:])))
-
-	for reference, expected := range map[git.ReferenceName]bool{
-		"refs/heads/main":   true,
-		"refs/heads/broken": true,
-		"refs/heads/x":      false,
-		"refs/heads/x*":     false,
-		"refs/heads/main~1": false,
-	} {
-		exists, err := repo.ReferenceExists(ctx, reference)
-		require.NoError(t, err, reference)
-		require.Equal(t, expected, exists, reference)
-	}
+		defaultBranch, err := repo.GetDefaultBranch(ctx)
+		require.NoError(t, err)
+		require.Equal(t, git.LegacyDefaultRef, defaultBranch)
+	})
 }
 
 func TestRepo_GetReferenceWithAmbiguousRefs(t *testing.T) {

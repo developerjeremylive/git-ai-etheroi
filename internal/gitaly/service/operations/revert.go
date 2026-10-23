@@ -208,95 +208,111 @@ func (s *Server) UserRevert(ctx context.Context, req *gitalypb.UserRevertRequest
 
 // resolveStartBranch resolves the start branch name of a request, a revision, to its commit, as
 // git resolves it with one deviation. objectHash is the object format of the repository the start
-// branch is read from; exists reports whether a reference exists there under its exact name, and
+// branch is read from; read returns the value of a reference there, read by its exact name
+// (git.ErrReferenceNotFound when it does not exist, a dangling symbolic reference included), and
 // resolve is git's resolution of a revision there.
 //
 // The revision is split into the name it starts with and its suffix (~1, ^{}, @{1}, :path). git
-// takes a full object ID (in either case) for the object, a root reference such as HEAD or
-// FETCH_HEAD from the repository's directory, and any other name x by its DWIM rules, the first
-// that exists of refs/x, refs/tags/x, refs/heads/x, refs/remotes/x and refs/remotes/x/HEAD. The
-// one deviation: when that is a reference with the same name as the branch, the tag refs/tags/x or,
-// when x names no namespace (no /), refs/x, and the branch refs/heads/x exists, the branch is taken.
-// An existing branch of the exact name beats a non-branch reference of the same name, such as a tag
-// an agent pushed to shadow it; a name such as tags/v1 or remotes/origin/main names its namespace,
-// and everything else follows git. When
-// no reference is named x, git's resolution answers, by design: a SHA (abbreviated) or another
-// revision keeps working as a start point, as before.
+// takes a full object ID (in either case) for the object; a root reference such as HEAD or
+// FETCH_HEAD, when it exists, from the repository's directory (git reads other upper-case files
+// there too, such as AUTO_MERGE, but a push cannot write them); and any other name x by its DWIM
+// rules, the first that exists of refs/x, refs/tags/x, refs/heads/x, refs/remotes/x and
+// refs/remotes/x/HEAD. The one deviation: when that is a reference with the same name as the
+// branch, the tag refs/tags/x or refs/x, and the branch refs/heads/x exists, the branch is taken. An
+// existing branch of the exact name beats a non-branch reference of the same name, such as a tag an
+// agent pushed to shadow it. A name that starts with a namespace git itself prefixes (heads/, tags/,
+// remotes/) names it, and follows git, as everything else does. When no reference is named x,
+// git's resolution answers, by design: an abbreviated SHA or another revision keeps working as a
+// start point, as before. A full reference name (refs/...) is read exactly as given, with no
+// fallback: a missing refs/heads/x does not resolve through refs/refs/heads/x or another decoy.
 //
-// A full reference name (refs/...) is read exactly as given, with no fallback: a missing
-// refs/heads/x does not resolve through refs/refs/heads/x or another decoy. The suffix applies to
-// the reference that was chosen, by its full name: that is the first name git's DWIM rules try, so
-// an existing reference is read exactly.
+// The chosen reference is read once, to its value, and the suffix applies to that object ID: no
+// rule resolves the name again, so a reference that is dangling, or that goes away meanwhile, never
+// yields a decoy. A reflog suffix (@{n}) needs the name: it is resolved by the full name, and the
+// reference must still have the value read.
 func resolveStartBranch(
 	name string,
 	objectHash git.ObjectHash,
-	exists func(git.ReferenceName) (bool, error),
+	read func(git.ReferenceName) (git.ObjectID, error),
 	resolve func(git.Revision) (git.ObjectID, error),
 ) (git.ObjectID, error) {
-	asGit := func() (git.ObjectID, error) { return resolve(git.Revision(name + "^{commit}")) }
-
 	base, suffix := splitRevisionSuffix(name)
-	switch {
 	// A revision that starts with its suffix (@{-1}, :path) names no reference.
-	case base == "", isRootReference(base), isFullObjectID(base, objectHash):
-		return asGit()
-	case strings.HasPrefix(base, "refs/"):
-		found, err := exists(git.ReferenceName(base))
-		if err != nil {
-			return "", err
-		}
-		if !found {
-			return "", git.ErrReferenceNotFound
-		}
-		return resolve(git.Revision(base + suffix + "^{commit}"))
+	if base == "" || isFullObjectID(base, objectHash) {
+		return resolve(git.Revision(name + "^{commit}"))
 	}
 
-	chosen, err := startReference(base, exists)
+	reference, value, err := startReference(base, read)
+	switch {
+	case err != nil:
+		return "", err
+	case reference == "" && strings.HasPrefix(base, "refs/"):
+		return "", git.ErrReferenceNotFound
+	case reference == "":
+		return resolve(git.Revision(name + "^{commit}"))
+	case !strings.Contains(suffix, "@{"):
+		return resolve(git.Revision(value.String() + suffix + "^{commit}"))
+	}
+
+	commit, err := resolve(git.Revision(reference.String() + suffix + "^{commit}"))
 	if err != nil {
 		return "", err
 	}
-	if chosen == "" {
-		return asGit()
+	again, err := read(reference)
+	if err != nil {
+		return "", err
 	}
-	return resolve(git.Revision(chosen.String() + suffix + "^{commit}"))
+	if again != value {
+		return "", fmt.Errorf("reference %q changed while its reflog was read", reference)
+	}
+	return commit, nil
 }
 
-// startReference returns the reference that git's DWIM rules resolve the bare name to, with the
-// deviation of resolveStartBranch, or an empty name when there is none.
-func startReference(name string, exists func(git.ReferenceName) (bool, error)) (git.ReferenceName, error) {
+// startReference returns the reference that git resolves the name to, with the deviation of
+// resolveStartBranch, and its value; an empty name when there is none.
+func startReference(name string, read func(git.ReferenceName) (git.ObjectID, error)) (git.ReferenceName, git.ObjectID, error) {
+	if strings.HasPrefix(name, "refs/") {
+		value, err := read(git.ReferenceName(name))
+		if errors.Is(err, git.ErrReferenceNotFound) {
+			return "", "", nil
+		}
+		return git.ReferenceName(name), value, err
+	}
+
 	branch := git.ReferenceName("refs/heads/" + name)
 	other := git.ReferenceName("refs/" + name)
 	tag := git.ReferenceName("refs/tags/" + name)
-	for _, candidate := range []git.ReferenceName{
-		other, tag, branch, git.ReferenceName("refs/remotes/" + name), git.ReferenceName("refs/remotes/" + name + "/HEAD"),
-	} {
-		found, err := exists(candidate)
-		if err != nil {
-			return "", err
-		}
-		if !found {
+	candidates := []git.ReferenceName{other, tag, branch, git.ReferenceName("refs/remotes/" + name), git.ReferenceName("refs/remotes/" + name + "/HEAD")}
+	if isRootReference(name) {
+		candidates = append([]git.ReferenceName{git.ReferenceName(name)}, candidates...)
+	}
+	namesNamespace := strings.HasPrefix(name, "heads/") || strings.HasPrefix(name, "tags/") || strings.HasPrefix(name, "remotes/")
+
+	for _, candidate := range candidates {
+		value, err := read(candidate)
+		if errors.Is(err, git.ErrReferenceNotFound) {
 			continue
 		}
-		// The deviation applies to a reference with the same name as the branch: the tag
-		// refs/tags/x, or refs/x when x names no namespace. A name such as tags/v1 or
-		// remotes/origin/main names its namespace, and follows git.
-		if candidate == tag || (candidate == other && !strings.Contains(name, "/")) {
-			isBranch, err := exists(branch)
-			if err != nil {
-				return "", err
+		if err != nil {
+			return "", "", err
+		}
+		if !namesNamespace && (candidate == other || candidate == tag) {
+			branchValue, err := read(branch)
+			if err == nil {
+				return branch, branchValue, nil
 			}
-			if isBranch {
-				return branch, nil
+			if !errors.Is(err, git.ErrReferenceNotFound) {
+				return "", "", err
 			}
 		}
-		return candidate, nil
+		return candidate, value, nil
 	}
-	return "", nil
+	return "", "", nil
 }
 
 // isRootReference reports whether name has the syntax of a root reference, which git reads from
-// the repository's directory before any DWIM rule: HEAD, or upper-case letters and underscores
-// ending in _HEAD (FETCH_HEAD, ORIG_HEAD, MERGE_HEAD, ...).
+// the repository's directory before any DWIM rule when it exists: HEAD, or upper-case letters and
+// underscores ending in _HEAD (FETCH_HEAD, ORIG_HEAD, MERGE_HEAD, ...).
 func isRootReference(name string) bool {
 	if name == "HEAD" {
 		return true
@@ -349,8 +365,8 @@ func (s *Server) fetchStartRevision(
 
 	// The start branch is read in the start repository, or in the local one without it.
 	objectHashOf := localRepo.ObjectHash
-	exists := func(name git.ReferenceName) (bool, error) {
-		return localRepo.ReferenceExists(ctx, name)
+	read := func(name git.ReferenceName) (git.ObjectID, error) {
+		return localRepo.ResolveReferenceExactly(ctx, name)
 	}
 	resolve := func(revision git.Revision) (git.ObjectID, error) {
 		return localRepo.ResolveRevision(ctx, revision)
@@ -361,8 +377,8 @@ func (s *Server) fetchStartRevision(
 			return "", structerr.NewInternal("%w", err)
 		}
 		objectHashOf = remoteRepo.ObjectHash
-		exists = func(name git.ReferenceName) (bool, error) {
-			return remoteRepo.ReferenceExists(ctx, name)
+		read = func(name git.ReferenceName) (git.ObjectID, error) {
+			return remoteRepo.ReadReference(ctx, name)
 		}
 		resolve = func(revision git.Revision) (git.ObjectID, error) {
 			return remoteRepo.ResolveRevision(ctx, revision)
@@ -373,7 +389,7 @@ func (s *Server) fetchStartRevision(
 		return "", structerr.NewInternal("detecting object hash: %w", err)
 	}
 
-	startRevision, err := resolveStartBranch(string(startBranchName), objectHash, exists, resolve)
+	startRevision, err := resolveStartBranch(string(startBranchName), objectHash, read, resolve)
 	if err != nil {
 		return "", structerr.NewInvalidArgument("resolve start ref: %w", err)
 	}
