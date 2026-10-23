@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/feder-cr/git-ai/internal/git"
 	"github.com/feder-cr/git-ai/internal/graft/workspace"
@@ -194,6 +195,10 @@ func repoCreate(ctx context.Context, out io.Writer, o *options, f *repoFlags, ar
 		// Complete the existing repository below.
 	case sdk.IsAlreadyExists(err):
 		return fmt.Errorf("repository %s exists already", displayText(relativePath))
+	case sdk.Code(err) == codes.FailedPrecondition && strings.HasSuffix(status.Convert(err).Message(), "repository is already locked"):
+		// The server's answer while another request creates or removes the
+		// repository (repoutil.Create, wrapped by the handler).
+		return fmt.Errorf("repository %s is being created or removed by another request: %w\nrun the same command again once it is done", displayText(relativePath), err)
 	default:
 		return withOperatorHint(err)
 	}

@@ -179,12 +179,15 @@ func TestCLIRepoCreateConverges(t *testing.T) {
 		}
 		wg.Wait()
 
-		path := filepath.Join(storagePath, "raced.git")
-		tip := strings.TrimSpace(string(gittest.Exec(t, env.cfg, "-C", path, "rev-parse", "refs/heads/main")))
+		// Every run converges on the repository, or fails cleanly because another
+		// run held the repository's lock while creating it.
 		created, commits := 0, 0
 		for i := 0; i < runs; i++ {
-			require.Equal(t, exitOK, codes[i], "run %d: %s", i, stderrs[i])
-			require.Equal(t, tip, results[i].InitialCommit, "run %d", i)
+			if codes[i] != exitOK {
+				require.Equal(t, exitError, codes[i], "run %d: %s", i, stderrs[i])
+				require.Contains(t, stderrs[i], "repository raced.git is being created or removed by another request", "run %d", i)
+				continue
+			}
 			if results[i].Created {
 				created++
 			}
@@ -194,6 +197,20 @@ func TestCLIRepoCreateConverges(t *testing.T) {
 		}
 		require.Equal(t, 1, created, "one run created the repository")
 		require.Equal(t, 1, commits, "one run made the initial commit")
+
+		// The same command afterwards changes nothing.
+		path := filepath.Join(storagePath, "raced.git")
+		tip := strings.TrimSpace(string(gittest.Exec(t, env.cfg, "-C", path, "rev-parse", "refs/heads/main")))
+		code, again, stderr := repoCLI(t, server, "raced.git", "--initial-commit", "--branch", "feature")
+		require.Equal(t, exitOK, code, stderr)
+		require.Equal(t, tip, again.InitialCommit)
+		require.False(t, again.InitialCommitCreated)
+		require.Equal(t, []string{"feature"}, again.BranchesExisting)
+		for i := 0; i < runs; i++ {
+			if codes[i] == exitOK {
+				require.Equal(t, tip, results[i].InitialCommit, "run %d", i)
+			}
+		}
 		requireRefs(t, env.cfg, path, map[string]string{"refs/heads/main": tip, "refs/heads/feature": tip})
 	})
 }

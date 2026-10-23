@@ -250,7 +250,7 @@ func TestCreate_unsuccessful(t *testing.T) {
 					},
 				},
 			},
-			expectedErr: structerr.NewInternal("creating object pool: locking repository: file already locked"),
+			expectedErr: structerr.NewFailedPrecondition("creating object pool: repository is already locked"),
 		},
 		{
 			desc: "pool exists",
