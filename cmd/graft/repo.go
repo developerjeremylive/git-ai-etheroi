@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -123,8 +124,16 @@ type repoProgress struct {
 	done, left []string
 }
 
-// fail reports err with what was done and what is left. A denial of the
-// server's policy says so: running the command again is denied the same way.
+// repoRefusal is a state of the repository that graft repo create does not
+// change: running the same command again fails the same way until the
+// repository or the arguments change.
+type repoRefusal struct{ reason string }
+
+func (r repoRefusal) Error() string { return r.reason }
+
+// fail reports err with what was done and what is left. A refusal and a denial
+// of the server's policy say so: running the command again fails the same way.
+// Any other failure is worth running again.
 func (p *repoProgress) fail(relativePath string, err error) error {
 	report := ""
 	if len(p.done) > 0 {
@@ -132,6 +141,10 @@ func (p *repoProgress) fail(relativePath string, err error) error {
 	}
 	if len(p.left) > 0 {
 		report += "\nleft: " + strings.Join(p.left, "; ")
+	}
+	var refusal repoRefusal
+	if errors.As(err, &refusal) {
+		return fmt.Errorf("repository %s: %w%s", displayText(relativePath), err, report)
 	}
 	if sdk.Code(err) == codes.PermissionDenied {
 		return fmt.Errorf("repository %s: denied by the server: %w%s\nthe same command is denied again until the policy allows the user of GRAFT_USER (-user) to write these branches", displayText(relativePath), err, report)
@@ -198,7 +211,7 @@ func repoCreate(ctx context.Context, out io.Writer, o *options, f *repoFlags, ar
 	case sdk.Code(err) == codes.FailedPrecondition && strings.HasSuffix(status.Convert(err).Message(), "repository is already locked"):
 		// The server's answer while another request creates or removes the
 		// repository (repoutil.Create, wrapped by the handler).
-		return fmt.Errorf("repository %s is being created or removed by another request: %w\nrun the same command again once it is done", displayText(relativePath), err)
+		return fmt.Errorf("repository %s is locked by another request that creates or removes it, or by a lock such a request left behind: %w\nretry later; if it persists, an operator should check %s.lock on the server", displayText(relativePath), err, displayText(relativePath))
 	default:
 		return withOperatorHint(err)
 	}
@@ -256,17 +269,17 @@ func repoCreate(ctx context.Context, out io.Writer, o *options, f *repoFlags, ar
 }
 
 // repoBranches validates the branch names of graft repo create with git's
-// reference name rules, before any server call, and returns the default branch
+// branch name rules, before any server call, and returns the default branch
 // and the extra branches without duplicates and without the default branch.
 func repoBranches(f *repoFlags) (string, []string, error) {
 	defaultBranch := strings.TrimPrefix(f.defaultBranch, "refs/heads/")
-	if err := git.ValidateReference("refs/heads/" + defaultBranch); err != nil || defaultBranch == "" {
+	if !validBranchName(defaultBranch) {
 		return "", nil, usagef("repo create: invalid --default-branch %q", f.defaultBranch)
 	}
 	var branches []string
 	for _, branch := range f.branches {
 		name := strings.TrimPrefix(branch, "refs/heads/")
-		if err := git.ValidateReference("refs/heads/" + name); err != nil || name == "" {
+		if !validBranchName(name) {
 			return "", nil, usagef("repo create: invalid --branch %q", branch)
 		}
 		if name != defaultBranch && !slices.Contains(branches, name) {
@@ -274,6 +287,14 @@ func repoBranches(f *repoFlags) (string, []string, error) {
 		}
 	}
 	return defaultBranch, branches, nil
+}
+
+// validBranchName reports whether name is a valid branch name, as
+// git check-ref-format --branch decides it: a valid reference name below
+// refs/heads/ that is not HEAD and does not start with a dash.
+func validBranchName(name string) bool {
+	return name != "" && name != "HEAD" && !strings.HasPrefix(name, "-") &&
+		git.ValidateReference("refs/heads/"+name) == nil
 }
 
 // ensureInitialCommit makes sure the default branch of repo has a commit and
@@ -285,11 +306,15 @@ func repoBranches(f *repoFlags) (string, []string, error) {
 func ensureInitialCommit(ctx context.Context, repo *sdk.Repo, defaultBranch string, user sdk.User, author workspace.Signature) (string, bool, error) {
 	ref := "refs/heads/" + defaultBranch
 	head, err := repo.Head(ctx)
+	if sdk.Code(err) == codes.FailedPrecondition {
+		// The server's answer for a detached HEAD.
+		return "", false, repoRefusal{fmt.Sprintf("HEAD does not point to a branch (%s), so no initial commit is made", status.Convert(err).Message())}
+	}
 	if err != nil {
 		return "", false, fmt.Errorf("reading HEAD: %w", err)
 	}
 	if head != ref {
-		return "", false, fmt.Errorf("HEAD points to %s, not %s: pass --default-branch %s, or no --initial-commit", displayText(head), displayText(ref), displayText(strings.TrimPrefix(head, "refs/heads/")))
+		return "", false, repoRefusal{fmt.Sprintf("HEAD points to %s, not %s: pass --default-branch %s, or no --initial-commit", displayText(head), displayText(ref), displayText(strings.TrimPrefix(head, "refs/heads/")))}
 	}
 
 	if tip, ok, err := branchTip(ctx, repo, ref); err != nil || ok {
@@ -305,7 +330,7 @@ func ensureInitialCommit(ctx context.Context, repo *sdk.Repo, defaultBranch stri
 		if tip, ok, err := branchTip(ctx, repo, ref); err != nil || ok {
 			return tip, false, err
 		}
-		return "", false, fmt.Errorf("the repository has references but no %s: it is not empty, so no initial commit is made", displayText(ref))
+		return "", false, repoRefusal{fmt.Sprintf("the repository has references but no %s: it is not empty, so no initial commit is made", displayText(ref))}
 	}
 
 	zero, err := repo.ZeroOID(ctx)

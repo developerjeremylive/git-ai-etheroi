@@ -158,6 +158,23 @@ func TestFindDefaultBranchName(t *testing.T) {
 			},
 		},
 		{
+			desc: "detached HEAD, HEAD only",
+			setup: func(t *testing.T, ctx context.Context, cfg config.Cfg) setupData {
+				repo, repoPath := gittest.CreateRepository(t, ctx, cfg)
+
+				oid := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch("main"))
+				gittest.Exec(t, cfg, "-C", repoPath, "update-ref", "--no-deref", "HEAD", oid.String())
+
+				return setupData{
+					request: &gitalypb.FindDefaultBranchNameRequest{
+						Repository: repo,
+						HeadOnly:   true,
+					},
+					expectedErr: structerr.NewFailedPrecondition("HEAD is detached: it does not point to a branch"),
+				}
+			},
+		},
+		{
 			desc: "repository not provided",
 			setup: func(t *testing.T, ctx context.Context, cfg config.Cfg) setupData {
 				return setupData{

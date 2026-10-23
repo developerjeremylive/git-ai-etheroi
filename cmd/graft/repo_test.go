@@ -128,6 +128,7 @@ func TestCLIRepoCreateConverges(t *testing.T) {
 		code, _, stderr = repoCLI(t, server, "trunk.git", "--initial-commit")
 		require.Equal(t, exitError, code)
 		require.Contains(t, stderr, "HEAD points to refs/heads/trunk, not refs/heads/main: pass --default-branch trunk")
+		require.NotContains(t, stderr, "run the same command again", "the refusal repeats identically")
 		requireRefs(t, env.cfg, filepath.Join(storagePath, "trunk.git"), map[string]string{})
 
 		code, res, stderr := repoCLI(t, server, "trunk.git", "--initial-commit", "--default-branch", "trunk")
@@ -146,8 +147,23 @@ func TestCLIRepoCreateConverges(t *testing.T) {
 			code, _, stderr = repoCLI(t, server, rel, "--initial-commit")
 			require.Equal(t, exitError, code, ref)
 			require.Contains(t, stderr, "the repository has references but no refs/heads/main: it is not empty, so no initial commit is made", ref)
+			require.NotContains(t, stderr, "run the same command again", ref)
 			requireRefs(t, env.cfg, path, map[string]string{ref: commit.String()})
 		}
+	})
+
+	t.Run("detached HEAD", func(t *testing.T) {
+		code, _, stderr := repoCLI(t, server, "detached.git")
+		require.Equal(t, exitOK, code, stderr)
+		path := filepath.Join(storagePath, "detached.git")
+		commit := gittest.WriteCommit(t, env.cfg, path, gittest.WithReference("refs/tags/v1"))
+		gittest.Exec(t, env.cfg, "-C", path, "update-ref", "--no-deref", "HEAD", commit.String())
+
+		code, _, stderr = repoCLI(t, server, "detached.git", "--initial-commit")
+		require.Equal(t, exitError, code)
+		require.Contains(t, stderr, "repository detached.git: HEAD does not point to a branch (HEAD is detached: it does not point to a branch), so no initial commit is made")
+		require.NotContains(t, stderr, "run the same command again")
+		requireRefs(t, env.cfg, path, map[string]string{"refs/tags/v1": commit.String()})
 	})
 
 	t.Run("existing default branch is the initial commit", func(t *testing.T) {
@@ -185,7 +201,8 @@ func TestCLIRepoCreateConverges(t *testing.T) {
 		for i := 0; i < runs; i++ {
 			if codes[i] != exitOK {
 				require.Equal(t, exitError, codes[i], "run %d: %s", i, stderrs[i])
-				require.Contains(t, stderrs[i], "repository raced.git is being created or removed by another request", "run %d", i)
+				require.Contains(t, stderrs[i], "repository raced.git is locked by another request that creates or removes it, or by a lock such a request left behind", "run %d", i)
+				require.Contains(t, stderrs[i], "retry later; if it persists, an operator should check raced.git.lock on the server", "run %d", i)
 				continue
 			}
 			if results[i].Created {
@@ -316,22 +333,29 @@ func TestCLIRepoUsageErrorsDoNotContactServer(t *testing.T) {
 	nowhere := []string{"-address", "unix://" + filepath.Join(t.TempDir(), "missing.sock")}
 
 	cases := map[string][]string{
-		"no subcommand":                 {"repo"},
-		"unknown subcommand":            {"repo", "delete", "a.git"},
-		"no repository":                 {"repo", "create"},
-		"two repositories":              {"repo", "create", "a.git", "b.git"},
-		"branch without initial commit": {"repo", "create", "a.git", "--branch", "x"},
-		"unknown object format":         {"repo", "create", "a.git", "--object-format", "md5"},
-		"empty default branch":          {"repo", "create", "a.git", "--default-branch", ""},
-		"invalid default branch":        {"repo", "create", "a.git", "--default-branch", "a..b"},
-		"default branch HEAD":           {"repo", "create", "a.git", "--default-branch", "HEAD.lock"},
-		"invalid branch":                {"repo", "create", "a.git", "--initial-commit", "--branch", "bad name"},
-		"invalid second branch":         {"repo", "create", "a.git", "--initial-commit", "--branch", "ok", "--branch", "x~1"},
-		"author without name":           {"repo", "create", "a.git", "-author", "<a@b.c>"},
+		"no subcommand":                     {"repo"},
+		"unknown subcommand":                {"repo", "delete", "a.git"},
+		"no repository":                     {"repo", "create"},
+		"two repositories":                  {"repo", "create", "a.git", "b.git"},
+		"--branch without --initial-commit": {"repo", "create", "a.git", "--branch", "x"},
+		"unknown object format":             {"repo", "create", "a.git", "--object-format", "md5"},
+		"empty default branch":              {"repo", "create", "a.git", "--default-branch", ""},
+		"invalid default branch":            {"repo", "create", "a.git", "--default-branch", "a..b"},
+		"default branch .lock":              {"repo", "create", "a.git", "--default-branch", "HEAD.lock"},
+		"default branch HEAD":               {"repo", "create", "a.git", "--default-branch", "HEAD"},
+		"default branch with a dash":        {"repo", "create", "a.git", "--default-branch", "-x"},
+		"branch HEAD":                       {"repo", "create", "a.git", "--initial-commit", "--branch", "HEAD"},
+		"branch with a dash":                {"repo", "create", "a.git", "--initial-commit", "--branch", "-x"},
+		"invalid branch":                    {"repo", "create", "a.git", "--initial-commit", "--branch", "bad name"},
+		"invalid second branch":             {"repo", "create", "a.git", "--initial-commit", "--branch", "ok", "--branch", "x~1"},
+		"author without name":               {"repo", "create", "a.git", "-author", "<a@b.c>"},
 	}
 	for name, args := range cases {
 		code, _, stderr := runCLI(t, append(args, nowhere...)...)
 		require.Equal(t, exitUsage, code, "%s: %s", name, stderr)
+		if strings.HasPrefix(name, "default branch") || strings.HasPrefix(name, "branch") || strings.HasPrefix(name, "invalid") {
+			require.Contains(t, stderr, "repo create: invalid --", "%s: the name is refused, not parsed as a flag", name)
+		}
 	}
 
 	code, _, stderr := runCLI(t, "repo", "create", "a.git", "-address", "")

@@ -50,7 +50,8 @@ func (r *Repo) Create(ctx context.Context, opts CreateOptions) error {
 
 // Head returns the full name of the reference that HEAD of the repository
 // points to, for example refs/heads/main. The reference may not exist yet, as
-// in a repository without commits.
+// in a repository without commits. A detached HEAD fails with
+// FailedPrecondition. Agents may call it.
 func (r *Repo) Head(ctx context.Context) (string, error) {
 	resp, err := gitalypb.NewRefServiceClient(r.client.conn).FindDefaultBranchName(ctx, &gitalypb.FindDefaultBranchNameRequest{
 		Repository: r.repository(),
@@ -64,7 +65,7 @@ func (r *Repo) Head(ctx context.Context) (string, error) {
 
 // HasReferences reports whether the repository has any reference at all
 // (branches, tags and every other namespace below refs/). It stops reading at
-// the first reference. Like Create, it needs the shared token.
+// the first reference. Agents may call it.
 func (r *Repo) HasReferences(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
