@@ -18,6 +18,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/storage"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/grpc/metadata"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/transaction/txinfo"
@@ -155,6 +156,12 @@ type ChangelogMeta struct {
 	// the request has no MVCC cache that it commits, or when the changeset log is
 	// disabled.
 	MVCCCommit string `json:"mvcc_commit,omitempty"`
+	// PolicyGeneration is the generation of the standalone access policy under which a land
+	// batch admitted its members (policystore.WithAdmissionGeneration). The
+	// reference-transaction hook refuses the batch's update when the policy in force is another
+	// one (doc/graft/PLAN12.md, section 5). Only the server builds it from the context, like
+	// Members.
+	PolicyGeneration uint64 `json:"policy_generation,omitempty"`
 	// Members lists the changes that a batched land folded into the updates, in
 	// the order they were landed (see changelog.WithBatch). The list is capped at
 	// maxChangelogMembersSize. Only the server builds it from the context, so a
@@ -302,6 +309,7 @@ func NewHooksPayload(
 			LandReference:    landReference,
 			Lands:            lands,
 			MVCCCommit:       mvccCommitHandle(ctx, cfg),
+			PolicyGeneration: policystore.AdmissionGeneration(ctx),
 		},
 	}
 }

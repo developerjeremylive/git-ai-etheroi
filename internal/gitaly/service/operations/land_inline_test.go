@@ -2,6 +2,7 @@ package operations
 
 import (
 	"fmt"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"strings"
 	"sync"
 	"testing"
@@ -173,6 +174,7 @@ func TestLandResolveInline_neverForAnAgentThePolicyDenies(t *testing.T) {
 	fx := newResolveFixture(t, rcfg)
 	s := fx.server(t, rcfg)
 	s.graft = config.Graft{Standalone: true, Policy: []config.GraftPolicyRule{{Actor: "agent-7", Refs: []string{"refs/heads/other"}, Allow: true}}}
+	s.graftPolicy = policystore.New(s.graft.Policy)
 	ctx := identity.NewContext(fx.ctx, identity.Identity{Name: "agent-7", Source: identity.SourceAgent})
 
 	l, err := landListConflicts(ctx, fx.repo, fx.tip, fx.commit, 1<<20)
@@ -184,6 +186,7 @@ func TestLandResolveInline_neverForAnAgentThePolicyDenies(t *testing.T) {
 
 	// The same agent where the policy lets it update the branch.
 	s.graft.Policy = []config.GraftPolicyRule{{Actor: "agent-7", Refs: []string{"refs/heads/**"}, Allow: true}}
+	s.graftPolicy = policystore.New(s.graft.Policy)
 	require.Equal(t, landInlineResolved, s.landResolveInline(ctx, fx.request("Land"), fx.tip, fx.commit, l, pre))
 	require.Equal(t, 1, unionCalls(t, dir))
 }

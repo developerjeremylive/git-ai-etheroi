@@ -3,6 +3,7 @@ package operations
 import (
 	"errors"
 	"fmt"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"os"
 	"strconv"
 	"strings"
@@ -420,6 +421,7 @@ func TestResolveLandConflicts_policyFirst(t *testing.T) {
 	fx := newResolveFixture(t, enabledResolver(argv))
 	s := fx.server(t, enabledResolver(argv))
 	s.graft = gitalycfg.Graft{Standalone: true, Policy: []gitalycfg.GraftPolicyRule{{Actor: "agent-7", Refs: []string{"refs/heads/other"}, Allow: true}}}
+	s.graftPolicy = policystore.New(s.graft.Policy)
 	ctx := identity.NewContext(fx.ctx, identity.Identity{Name: "agent-7", Source: identity.SourceAgent})
 
 	_, err := s.resolveLandConflicts(ctx, fx.request("Land"), fx.repo, fx.tip, fx.commit, fx.committer())
@@ -433,6 +435,7 @@ func TestResolveLandConflicts_policyFirst(t *testing.T) {
 
 	// An agent the policy lets update the branch gets its proposals.
 	s.graft.Policy = []gitalycfg.GraftPolicyRule{{Actor: "agent-7", Refs: []string{"refs/heads/**"}, Allow: true}}
+	s.graftPolicy = policystore.New(s.graft.Policy)
 	_, err = s.resolveLandConflicts(ctx, fx.request("Land"), fx.repo, fx.tip, fx.commit, fx.committer())
 	var unresolved *landUnresolvedError
 	require.ErrorAs(t, err, &unresolved)

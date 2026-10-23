@@ -50,6 +50,7 @@ import (
 	_ "github.com/feder-cr/git-ai/internal/graft/derived/graph" // registers the graph warmer
 	"github.com/feder-cr/git-ai/internal/graft/eager"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/graft/resolver"
 	"github.com/feder-cr/git-ai/internal/grpc/backchannel"
 	"github.com/feder-cr/git-ai/internal/grpc/client"
@@ -216,10 +217,10 @@ func configure(configPath string) (config.Cfg, log.Logger, error) {
 // callbacks. In Graft standalone mode it is the built-in policy client and
 // GitLab is never contacted. Otherwise it is the stub client when hooks are
 // bypassed for testing, and the GitLab HTTP client in all other cases.
-func newGitlabAPIClient(logger log.Logger, cfg config.Cfg) (gitlab.Client, error) {
+func newGitlabAPIClient(logger log.Logger, cfg config.Cfg, policy *policystore.Store) (gitlab.Client, error) {
 	if cfg.Graft.Standalone {
 		logger.Info("graft standalone mode: access checks use the built-in policy, GitLab is not contacted")
-		return gitlab.NewStandaloneClient(cfg.Graft, logger), nil
+		return gitlab.NewStandaloneClientWithPolicy(policy, logger), nil
 	}
 
 	if skipHooks, _ := env.GetBool("GITALY_TESTING_NO_GIT_HOOKS", false); skipHooks {
@@ -584,7 +585,14 @@ func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger) error {
 		mvccMiddleware,
 	)
 
-	gitlabClient, err := newGitlabAPIClient(logger, cfg)
+	// The standalone access policy is held by one store, which every reader decides with and
+	// SIGUSR1 reloads from the configuration file (doc/graft/PLAN12.md).
+	graftPolicy := policystore.New(cfg.Graft.Policy)
+	prometheus.MustRegister(graftPolicy)
+	stopPolicyReload := reloadPolicyOnSignal(logger, appCtx.Args().First(), cfg.Graft, graftPolicy)
+	defer stopPolicyReload()
+
+	gitlabClient, err := newGitlabAPIClient(logger, cfg, graftPolicy)
 	if err != nil {
 		return err
 	}
@@ -621,7 +629,7 @@ func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger) error {
 	// storage core.
 	prometheus.MustRegister(reviewroots.DefaultSweeper)
 
-	hookManagerOpts := []hook.ManagerOption{hook.WithEagerObserver(eagerObserver)}
+	hookManagerOpts := []hook.ManagerOption{hook.WithEagerObserver(eagerObserver), hook.WithPolicyStore(graftPolicy)}
 	var (
 		storageSyncer corestore.Freshener
 		storageGate   *gate.Gate
@@ -832,6 +840,7 @@ func run(appCtx *cli.Command, cfg config.Cfg, logger log.Logger) error {
 			ArchiveCache:           archiveStreamCache,
 			PoolMetadataStore:      poolMetadataStore,
 			GitlabClient:           gitlabClient,
+			GraftPolicy:            graftPolicy,
 			ObjectPoolStateManager: objectPoolStateManager,
 			PostReceiveRegistry:    postReceiveRegistry,
 			GraftLandLanes:         landLanes,

@@ -197,7 +197,7 @@ func (s *Server) landPrecheckResolution(ctx context.Context, in *gitalypb.UserLa
 	// alone, so it comes first, as in landResolveAt. Otherwise a denied agent could hold the
 	// repository's verify slot, and its tree would run in the operator's sandbox.
 	reference := git.NewReferenceNameFromBranchName(string(in.GetBranch()))
-	if err := hook.CheckAgentPolicy(ctx, s.graft, fmt.Sprintf("%s %s %s\n", tip, commitID, reference)); err != nil {
+	if err := hook.CheckAgentPolicy(ctx, s.graftInForce(), fmt.Sprintf("%s %s %s\n", tip, commitID, reference)); err != nil {
 		return nil, err
 	}
 

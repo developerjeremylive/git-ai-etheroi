@@ -11,6 +11,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/git/gitcmd"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
 	"github.com/feder-cr/git-ai/internal/graft/identity"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -47,6 +48,7 @@ func graftPolicyManager(t *testing.T, graft config.Graft) *GitLabHookManager {
 	return &GitLabHookManager{
 		cfg:    config.Cfg{Graft: graft},
 		logger: testhelper.SharedLogger(t),
+		policy: policystore.New(graft.Policy),
 	}
 }
 
@@ -257,8 +259,7 @@ func TestEnforceGraftPolicy_batchIsHeldToTheReservation(t *testing.T) {
 	t.Parallel()
 
 	ctx := testhelper.Context(t)
-	payload := `{"graft_changelog":{"operation":"land_batch","members":[{"original_commit":"a","commit":"b","actor":"agent-a"}]}}`
-	env := []string{gitcmd.EnvHooksPayload + "=" + base64.StdEncoding.EncodeToString([]byte(payload))}
+	env := batchEnv(1)
 
 	for name, graft := range map[string]config.Graft{
 		"standalone, policy denies": {Standalone: true, Policy: []config.GraftPolicyRule{{Allow: false}}},
@@ -270,6 +271,62 @@ func TestEnforceGraftPolicy_batchIsHeldToTheReservation(t *testing.T) {
 		require.ErrorContains(t, err, "reserved for the server", name)
 		require.NoError(t, m.enforceGraftPolicy(ctx, env, policyChanges("refs/heads/main")), "%s: the batch skips the policy", name)
 	}
+}
+
+// batchEnv returns the hook environment of the combined update of a land batch whose members were
+// admitted under the given generation of the policy.
+func batchEnv(generation uint64) []string {
+	payload := fmt.Sprintf(`{"graft_changelog":{"operation":"land_batch","policy_generation":%d,"members":[{"original_commit":"a","commit":"b","actor":"agent-a"}]}}`, generation)
+	return []string{gitcmd.EnvHooksPayload + "=" + base64.StdEncoding.EncodeToString([]byte(payload))}
+}
+
+// TestEnforceGraftPolicy_batchUnderAnotherPolicy: in standalone mode a batch whose members were
+// admitted under another generation of the policy than the one in force is refused with
+// PolicyChangedError, so that the batch lands each request alone under the policy in force
+// (doc/graft/PLAN12.md, section 5). A batch that carries no generation is refused too. Outside
+// standalone mode no member was admitted by a policy.
+func TestEnforceGraftPolicy_batchUnderAnotherPolicy(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	running := config.Graft{Standalone: true, Policy: []config.GraftPolicyRule{{Allow: true}}}
+	m := graftPolicyManager(t, running)
+	require.NoError(t, m.enforceGraftPolicy(ctx, batchEnv(1), policyChanges("refs/heads/main")))
+
+	next := running
+	next.Policy = []config.GraftPolicyRule{{Actor: "agent-a", Allow: false}, {Allow: true}}
+	_, err := m.policy.Reload(next, running)
+	require.NoError(t, err)
+
+	err = m.enforceGraftPolicy(ctx, batchEnv(1), policyChanges("refs/heads/main"))
+	var changed PolicyChangedError
+	require.ErrorAs(t, err, &changed)
+	require.Equal(t, PolicyChangedError{Admitted: 1, InForce: 2}, changed)
+	require.NoError(t, m.enforceGraftPolicy(ctx, batchEnv(2), policyChanges("refs/heads/main")))
+	require.ErrorAs(t, m.enforceGraftPolicy(ctx, batchEnv(0), policyChanges("refs/heads/main")), &changed)
+
+	outside := graftPolicyManager(t, config.Graft{Policy: running.Policy})
+	require.NoError(t, outside.enforceGraftPolicy(ctx, batchEnv(0), policyChanges("refs/heads/main")))
+}
+
+// TestEnforceGraftPolicy_decidesWithThePolicyInForce: the hook decides with the policy the store
+// holds now, not with the one it was built with.
+func TestEnforceGraftPolicy_decidesWithThePolicyInForce(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	running := config.Graft{Standalone: true, Policy: []config.GraftPolicyRule{{Actor: "agent-a", Allow: true}}}
+	m := graftPolicyManager(t, running)
+	require.NoError(t, m.enforceGraftPolicy(ctx, policyEnv(t, "agent-a", true), policyChanges("refs/heads/main")))
+
+	next := running
+	next.Policy = []config.GraftPolicyRule{{Actor: "agent-a", Refs: []string{"refs/heads/main"}, Allow: false}, {Allow: true}}
+	_, err := m.policy.Reload(next, running)
+	require.NoError(t, err)
+
+	err = m.enforceGraftPolicy(ctx, policyEnv(t, "agent-a", true), policyChanges("refs/heads/main"))
+	require.Equal(t, codes.PermissionDenied, status.Code(err))
+	require.ErrorContains(t, err, `policy denies "agent-a" to update "refs/heads/main" (rule 1)`)
 }
 
 // TestCheckAgentPolicy checks the policy check of the RPCs that skip the pre-receive hook: the

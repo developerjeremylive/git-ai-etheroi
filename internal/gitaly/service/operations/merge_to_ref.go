@@ -154,7 +154,7 @@ func (s *Server) UserMergeToRef(ctx context.Context, request *gitalypb.UserMerge
 	// implementation doesn't invoke hooks, so we don't either.
 	// The reference-transaction hook enforces the standalone policy, but Git only
 	// reports that it failed. Checking the policy here returns the denial itself.
-	if err := hook.CheckAgentPolicy(ctx, s.graft, fmt.Sprintf("%s %s %s\n", oldTargetOID, mergeOID, request.GetTargetRef())); err != nil {
+	if err := hook.CheckAgentPolicy(ctx, s.graftInForce(), fmt.Sprintf("%s %s %s\n", oldTargetOID, mergeOID, request.GetTargetRef())); err != nil {
 		return nil, err
 	}
 

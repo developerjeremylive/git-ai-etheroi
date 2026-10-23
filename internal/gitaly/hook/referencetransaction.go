@@ -477,11 +477,27 @@ func (m *GitLabHookManager) enforceGraftPolicy(ctx context.Context, env []string
 	return nil
 }
 
+// PolicyChangedError refuses the combined update of a land batch whose members were admitted under
+// another generation of the access policy than the one in force (doc/graft/PLAN12.md, section 5).
+// The batch then lands each request alone, under the policy in force.
+type PolicyChangedError struct {
+	// Admitted is the generation the batch admitted its members under (0 when the batch carried
+	// none), InForce the generation in force.
+	Admitted, InForce uint64
+}
+
+func (e PolicyChangedError) Error() string {
+	return fmt.Sprintf("the access policy changed during the land batch: its members were admitted under generation %d, generation %d is in force", e.Admitted, e.InForce)
+}
+
 // graftPolicyDecision is the decision of enforceGraftPolicy: the message of the
 // denial of the transaction, or an empty message when the policy allows it or
 // does not apply to it.
 func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (string, error) {
-	policyApplies := m.cfg.Graft.Standalone && len(m.cfg.Graft.Policy) > 0
+	// One policy decides the whole transaction: the one in force now, while git holds the
+	// references' locks (doc/graft/PLAN12.md, section 5).
+	policy := m.policy.Current()
+	policyApplies := m.cfg.Graft.Standalone && len(policy.Rules) > 0
 
 	meta, err := gitcmd.ChangelogMetaFromEnv(env)
 	if err != nil {
@@ -519,6 +535,14 @@ func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (s
 		}
 	}
 
+	// The members of a batch were admitted under one generation of the policy. If another one is
+	// in force, a member it denies would be landed: the batch is refused, and its requests land
+	// alone, each judged by the policy in force. Outside standalone mode no member was admitted
+	// by a policy, so there is nothing to compare.
+	if batch && m.cfg.Graft.Standalone && meta.PolicyGeneration != policy.Generation {
+		return "", PolicyChangedError{Admitted: meta.PolicyGeneration, InForce: policy.Generation}
+	}
+
 	if batch || !agent {
 		return "", nil
 	}
@@ -526,7 +550,7 @@ func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (s
 		return "", nil
 	}
 
-	message, err := graftPolicyDenial(m.cfg.Graft.Policy, meta.Actor, changes)
+	message, err := graftPolicyDenial(policy.Rules, meta.Actor, changes)
 	if err != nil {
 		return "", fmt.Errorf("evaluating graft policy: %w", err)
 	}

@@ -98,7 +98,7 @@ func (s *Server) landResolveInline(ctx context.Context, in *gitalypb.UserLandReq
 	// An agent that may not update the branch gets nothing resolved, as out of the lane (the policy first):
 	// the land goes out of the lane, which refuses it with the policy's message.
 	reference := git.NewReferenceNameFromBranchName(string(in.GetBranch()))
-	if err := hook.CheckAgentPolicy(ctx, s.graft, fmt.Sprintf("%s %s %s\n", tip, commitID, reference)); err != nil {
+	if err := hook.CheckAgentPolicy(ctx, s.graftInForce(), fmt.Sprintf("%s %s %s\n", tip, commitID, reference)); err != nil {
 		return landInlineNotTried
 	}
 

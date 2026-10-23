@@ -6,6 +6,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/git"
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
 	"github.com/feder-cr/git-ai/internal/gitlab"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -33,7 +34,7 @@ func TestNewGitlabAPIClient_Standalone(t *testing.T) {
 		},
 	}
 
-	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg)
+	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg, policystore.New(cfg.Graft.Policy))
 	require.NoError(t, err)
 
 	// The policy is enforced by the built-in client.
@@ -62,7 +63,7 @@ func TestNewGitlabAPIClient_StandaloneTakesPrecedenceOverBypass(t *testing.T) {
 		},
 	}
 
-	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg)
+	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg, policystore.New(cfg.Graft.Policy))
 	require.NoError(t, err)
 
 	allowed, _, err := client.Allowed(testhelper.Context(t), gitlab.AllowedParams{
@@ -76,7 +77,7 @@ func TestNewGitlabAPIClient_StandaloneTakesPrecedenceOverBypass(t *testing.T) {
 func TestNewGitlabAPIClient_BypassUsesStubClient(t *testing.T) {
 	t.Setenv("GITALY_TESTING_NO_GIT_HOOKS", "true")
 
-	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), config.Cfg{})
+	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), config.Cfg{}, policystore.New(nil))
 	require.NoError(t, err)
 
 	// The stub client does not connect to the internal API, so Check fails.
@@ -98,7 +99,7 @@ func TestNewGitlabAPIClient_HTTPClient(t *testing.T) {
 		},
 	}
 
-	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg)
+	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg, policystore.New(cfg.Graft.Policy))
 	require.NoError(t, err)
 
 	httpClient, ok := client.(*gitlab.HTTPClient)
@@ -121,7 +122,7 @@ func TestNewGitlabAPIClient_HTTPClientConfigurationError(t *testing.T) {
 		},
 	}
 
-	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg)
+	client, err := newGitlabAPIClient(testhelper.SharedLogger(t), cfg, policystore.New(cfg.Graft.Policy))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "could not create GitLab API client")
 	require.Nil(t, client)

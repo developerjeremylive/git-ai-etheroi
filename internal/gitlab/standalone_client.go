@@ -8,13 +8,15 @@ import (
 
 	"github.com/feder-cr/git-ai/internal/gitaly/config"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/log"
 )
 
 // standaloneClient is a Client for Graft's standalone mode. It never contacts
 // GitLab: access checks are answered from the ordered [graft] policy instead.
 type standaloneClient struct {
-	policy []config.GraftPolicyRule
+	// policy holds the policy in force, which the server may reload (doc/graft/PLAN12.md).
+	policy *policystore.Store
 	logger log.Logger
 }
 
@@ -24,8 +26,14 @@ type standaloneClient struct {
 // changed reference is allowed by the first policy rule that applies to it;
 // a reference that no rule applies to is denied.
 func NewStandaloneClient(cfg config.Graft, logger log.Logger) Client {
+	return NewStandaloneClientWithPolicy(policystore.New(cfg.Policy), logger)
+}
+
+// NewStandaloneClientWithPolicy is NewStandaloneClient for the policy that store holds, which the
+// server reloads: every access check is answered with the policy in force when it runs.
+func NewStandaloneClientWithPolicy(store *policystore.Store, logger log.Logger) Client {
 	return &standaloneClient{
-		policy: append([]config.GraftPolicyRule(nil), cfg.Policy...),
+		policy: store,
 		logger: logger.WithField("component", "standalone_client"),
 	}
 }
@@ -35,7 +43,7 @@ func NewStandaloneClient(cfg config.Graft, logger log.Logger) Client {
 // malformed change set or an invalid glob in the policy is reported as an
 // error.
 func (c *standaloneClient) Allowed(_ context.Context, params AllowedParams) (bool, string, error) {
-	allowed, message, err := EvaluatePolicy(c.policy, params.GLID, params.Changes)
+	allowed, message, err := EvaluatePolicy(c.policy.Current().Rules, params.GLID, params.Changes)
 	if err != nil || allowed {
 		return allowed, message, err
 	}

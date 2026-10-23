@@ -12,6 +12,7 @@ import (
 	"github.com/feder-cr/git-ai/internal/gitaly/hook/updateref"
 	"github.com/feder-cr/git-ai/internal/graft/changelog"
 	"github.com/feder-cr/git-ai/internal/graft/landlane"
+	"github.com/feder-cr/git-ai/internal/graft/policystore"
 	"github.com/feder-cr/git-ai/internal/log"
 	"github.com/feder-cr/git-ai/internal/structerr"
 	"github.com/feder-cr/git-ai/proto/go/gitalypb"
@@ -187,7 +188,7 @@ func (s *Server) newLandBatchStepper(ctx context.Context, repository *gitalypb.R
 		return nil, nil, err
 	}
 
-	return &serverLandBatchStepper{landingAttempt: attempt}, cleanup, nil
+	return &serverLandBatchStepper{landingAttempt: attempt, policy: s.graftPolicy.Current()}, cleanup, nil
 }
 
 // landBatchResult builds the result of a request of a batch.
@@ -235,6 +236,11 @@ func landBatchGiveUp(req *landBatchRequest, cause error, attempts int) error {
 // combined update of the batch.
 type serverLandBatchStepper struct {
 	*landingAttempt
+	// policy is the standalone access policy that admits the members of this batch attempt: one
+	// generation for all of them. The combined update carries its generation, and the
+	// reference-transaction hook refuses it when another policy is in force by then
+	// (doc/graft/PLAN12.md, section 5).
+	policy *policystore.Snapshot
 }
 
 // Land lands the request onto tip with the decision that every land makes (landingAttempt.decide).
@@ -276,7 +282,7 @@ func (st *serverLandBatchStepper) Land(ctx context.Context, tip git.ObjectID, re
 // runs as the graft-batch user, so every member is checked here, before it enters the running tip.
 // A denied request fails alone with the reason of the policy.
 func (st *serverLandBatchStepper) admit(req *landBatchRequest, reference git.ReferenceName, oldOID, newOID git.ObjectID) error {
-	allowed, message, err := hook.EvaluateGraftPolicy(st.server.graft, req.actor, reference.String(), oldOID.String(), newOID.String())
+	allowed, message, err := hook.EvaluateGraftPolicy(config.Graft{Policy: st.policy.Rules}, req.actor, reference.String(), oldOID.String(), newOID.String())
 	if err != nil {
 		return structerr.NewInternal("evaluating graft policy: %w", err)
 	}
@@ -310,6 +316,7 @@ func (st *serverLandBatchStepper) Update(ctx context.Context, reference git.Refe
 
 	ctx = batchUpdateContext(ctx)
 	ctx = changelog.WithBatch(changelog.WithOperation(ctx, changelog.OperationLandBatch), members)
+	ctx = policystore.WithAdmissionGeneration(ctx, st.policy.Generation)
 
 	// The compare-and-swap reads only the repository and the user of the request.
 	in := &gitalypb.UserLandRequest{
@@ -368,7 +375,10 @@ func (st *serverLandBatchStepper) updateKind(err error) (landUpdateKind, error) 
 
 	var customHookErr updateref.CustomHookError
 	var notAllowedErr hook.NotAllowedError
-	if errors.As(err, &customHookErr) || errors.As(err, &notAllowedErr) {
+	// A policy that changed since the members were admitted refuses the combined update: each
+	// request then lands alone, judged by the policy in force.
+	var policyChanged hook.PolicyChangedError
+	if errors.As(err, &customHookErr) || errors.As(err, &notAllowedErr) || errors.As(err, &policyChanged) {
 		return landUpdateRejected, err
 	}
 
