@@ -32,7 +32,6 @@ func unionResolver(t *testing.T) (string, []string) {
 
 // unionResolverMode is unionResolver with a mode:
 //   - "slow": takes 3 s to answer a request for the rules only (a rule that does not end in time);
-//   - "slowok": takes 0.4 s to answer a request for the rules only, and answers (a rule that is slow but ends);
 //   - "slowrule": a file whose theirs side says "slowrule" takes 2 s to resolve, for any request (a rule that
 //     is slower than inline_timeout and succeeds);
 //   - "slowonce": only the first request for the rules only takes 3 s (one hiccup);
@@ -60,8 +59,6 @@ if rules:
     open(dir + "/inline.log", "a").write("x\n")
     if mode == "slow":
         time.sleep(3)
-    if mode == "slowok":
-        time.sleep(0.4)
     if mode == "slowonce":
         try:
             os.close(os.open(dir + "/slowed", os.O_CREAT | os.O_EXCL))
