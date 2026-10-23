@@ -3,7 +3,6 @@ package operations
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 
 	"github.com/feder-cr/git-ai/internal/featureflag"
@@ -21,36 +20,27 @@ import (
 
 // setupFanOutRemoval runs the operations service with Git commands that lose every loose object
 // directory they create in a repository right after creating it, as housekeeping's git
-// prune-packed may at that moment (gittest.NewFanOutRemovingCommandFactory). A write RPC that
-// writes into a quarantine and migrates it succeeds; one that writes straight into the repository
-// fails.
-func setupFanOutRemoval(t *testing.T) (context.Context, config.Cfg, gitalypb.OperationServiceClient) {
+// prune-packed may at that moment (gittest.NewFanOutRemovingCommandFactory), once armed for a
+// repository. A write RPC that writes into a quarantine and migrates it succeeds; one that writes
+// straight into the repository fails.
+func setupFanOutRemoval(t *testing.T) (context.Context, config.Cfg, gitalypb.OperationServiceClient, func(repoPath string)) {
 	ctx := featureflag.OutgoingCtxWithFeatureFlag(testhelper.Context(t), featureflag.GPGSigning, false)
 	cfg := testcfg.Build(t)
-	factory := gittest.NewFanOutRemovingCommandFactory(t, ctx, cfg)
-	return setupOperationsServiceWithCfg(t, ctx, cfg, testserver.WithGitCommandFactory(factory))
-}
-
-// packWithoutFanOut packs every object of the repository and removes the emptied loose object
-// directories, as housekeeping does, so that every object the RPC writes needs one created.
-func packWithoutFanOut(t *testing.T, cfg config.Cfg, repoPath string) {
-	gittest.Exec(t, cfg, "-C", repoPath, "repack", "-a", "-d")
-	gittest.Exec(t, cfg, "-C", repoPath, "prune-packed")
-	fanOut, err := filepath.Glob(filepath.Join(repoPath, "objects", "[0-9a-f][0-9a-f]"))
-	require.NoError(t, err)
-	require.Empty(t, fanOut)
+	factory, arm := gittest.NewFanOutRemovingCommandFactory(t, ctx, cfg)
+	ctx, cfg, client := setupOperationsServiceWithCfg(t, ctx, cfg, testserver.WithGitCommandFactory(factory))
+	return ctx, cfg, client, arm
 }
 
 func TestUserApplyPatch_fanOutDirectoryRemoved(t *testing.T) {
 	t.Parallel()
 
-	ctx, cfg, client := setupFanOutRemoval(t)
+	ctx, cfg, client, arm := setupFanOutRemoval(t)
 
 	repoProto, repoPath := gittest.CreateRepository(t, ctx, cfg)
 	parentCommitID := gittest.WriteCommit(t, cfg, repoPath, gittest.WithBranch(git.DefaultBranch), gittest.WithTreeEntries(
 		gittest.TreeEntry{Path: "file", Mode: "100644", Content: "change me\n"},
 	))
-	packWithoutFanOut(t, cfg, repoPath)
+	arm(repoPath)
 
 	stream, err := client.UserApplyPatch(ctx)
 	require.NoError(t, err)
@@ -103,7 +93,7 @@ index 3742e48..e40a3b9 100644
 func TestUserMergeToRef_fanOutDirectoryRemoved(t *testing.T) {
 	t.Parallel()
 
-	ctx, cfg, client := setupFanOutRemoval(t)
+	ctx, cfg, client, arm := setupFanOutRemoval(t)
 
 	repoProto, repoPath := gittest.CreateRepository(t, ctx, cfg)
 	base := gittest.WriteCommit(t, cfg, repoPath, gittest.WithTreeEntries(
@@ -117,7 +107,7 @@ func TestUserMergeToRef_fanOutDirectoryRemoved(t *testing.T) {
 		gittest.TreeEntry{Path: "base", Mode: "100644", Content: "base\n"},
 		gittest.TreeEntry{Path: "theirs", Mode: "100644", Content: "theirs\n"},
 	))
-	packWithoutFanOut(t, cfg, repoPath)
+	arm(repoPath)
 
 	response, err := client.UserMergeToRef(ctx, &gitalypb.UserMergeToRefRequest{
 		Repository:     repoProto,
@@ -144,7 +134,7 @@ func TestUserLand_proposalsFanOutDirectoryRemoved(t *testing.T) {
 
 	ctx := testhelper.Context(t)
 	cfg := testcfg.Build(t)
-	factory := gittest.NewFanOutRemovingCommandFactory(t, ctx, cfg)
+	factory, arm := gittest.NewFanOutRemovingCommandFactory(t, ctx, cfg)
 
 	dir, argv := resolverScript(t, "")
 	writeAnswer(t, dir, modelAnswer())
@@ -164,7 +154,7 @@ func TestUserLand_proposalsFanOutDirectoryRemoved(t *testing.T) {
 		testserver.WithGitCommandFactory(factory),
 	)
 	gittest.Exec(t, fx.cfg, "-C", fx.repoPath, "update-ref", "refs/heads/landed", fx.commit.String())
-	packWithoutFanOut(t, fx.cfg, fx.repoPath)
+	arm(fx.repoPath)
 
 	_, err := fx.client.UserLand(fx.ctx, fx.request("Land"))
 	requireMergeConflict(t, err)
