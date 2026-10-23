@@ -679,6 +679,10 @@ func fetchInternalRemote(
 				// These fetched objects come from preexisting internal sources, thus it would be
 				// problematic for the fetch to fail consistency checks due to altered requirements.
 				gitcmd.WithConfig(gitcmd.ConfigPair{Key: "fetch.fsckObjects", Value: "false"}),
+				// The fetched objects are kept as a pack, never unpacked into loose objects: a
+				// loose object written into the repository would race housekeeping's removal of
+				// empty loose object directories, which fails git's write.
+				gitcmd.WithConfig(gitcmd.ConfigPair{Key: "fetch.unpackLimit", Value: "1"}),
 			},
 		},
 	); err != nil {
