@@ -521,31 +521,40 @@ func TestUserLand_aModelLandReleasesTheTicketItQueuedFor(t *testing.T) {
 	}
 }
 
-// TestLandResolveInline_aSlowRuleThatSucceedsIsChargedToTheBudget: the rule takes 0.4 s and ends, and the lane gives it
-// 1 s: six members of one batch attempt do not stall the lane for 6 x 0.4 s. All the time of the calls is the
-// batch's, and once it is spent the rest go out of the lane without a call.
+// TestLandResolveInline_aSlowRuleThatSucceedsIsChargedToTheBudget: a rule that is slow but ends in time is taken, and
+// all the time of its call is the batch's: what the next member is given is what is left of the budget, and once it
+// is spent the rest of the members go out of the lane without a call, so six members do not stall the lane six
+// times. The slowness is the budget's own bookkeeping (landInlineBudget.lost, which the test sets as a slow call
+// would have), not a rule that sleeps against a real clock, which a loaded machine does not keep.
 func TestLandResolveInline_aSlowRuleThatSucceedsIsChargedToTheBudget(t *testing.T) {
 	t.Parallel()
 
 	const members = 6
-	p := newInlineProbe(t, "slowok", func(c *config.GraftResolver) { c.InlineTimeout = "1s" })
+	const timeout = 30 * time.Second
+	p := newInlineProbe(t, "", func(c *config.GraftResolver) { c.InlineTimeout = "30s" })
 	budget := &landInlineBudget{}
 	ctx := withLandInlineBudget(p.fx.ctx, budget)
-
-	start := time.Now()
-	resolved := 0
-	for i := 0; i < members; i++ {
-		if p.resolve(ctx, t, newLandPreResolution()) == landInlineResolved {
-			resolved++
-		}
+	var given []time.Duration
+	var calls atomic.Int32
+	p.s.landInlineCallContext = func(ctx context.Context, allowed time.Duration) (context.Context, context.CancelFunc) {
+		calls.Add(1)
+		given = append(given, allowed)
+		return context.WithTimeout(ctx, allowed)
 	}
-	stalled := time.Since(start)
 
-	require.Positive(t, resolved, "a rule that ends in time is taken")
-	require.Less(t, resolved, members, "but not for every member")
-	require.Less(t, inlineCalls(t, p.dir), members, "the members that found the budget spent did not call")
-	require.Less(t, stalled, 1800*time.Millisecond, "the lane stalled for the budget, not for 6 x 0.4 s")
-	require.GreaterOrEqual(t, budget.lost, 400*time.Millisecond)
+	// The first member is given the whole timeout, its rule ends, and the time of the call is charged.
+	require.Equal(t, landInlineResolved, p.resolve(ctx, t, newLandPreResolution()), "a rule that ends in time is taken")
+	require.Positive(t, budget.lost, "the time of a call that succeeds is charged")
+	// A slow call would have charged 29 s: the next member is given what is left, 1 s.
+	budget.lost = 29 * time.Second
+	require.Equal(t, landInlineResolved, p.resolve(ctx, t, newLandPreResolution()))
+	require.Equal(t, []time.Duration{timeout, timeout - 29*time.Second}, given, "each member is given the rest of the budget")
+	// And that one spent it: the other members go out of the lane without a call.
+	budget.lost = timeout
+	for i := 2; i < members; i++ {
+		require.Equal(t, landInlineSlow, p.resolve(ctx, t, newLandPreResolution()), "member %d", i+1)
+	}
+	require.EqualValues(t, 2, calls.Load(), "the members that found the budget spent did not call")
 }
 
 // TestUserLand_aRuleSlowerThanTheTimeoutLandsOnAHotFile: a rule takes 2 s, longer than inline_timeout, on a file that
