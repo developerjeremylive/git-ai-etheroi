@@ -166,7 +166,7 @@ graft watch               # follow new changesets until interrupted
 
 The log lists every reference update the server accepted, including the
 temporary branches. A land appears as `land` next to the `commit_files` and
-`delete_refs` entries of its temporary branch. Each entry names the actor.
+`delete_branch` entries of its temporary branch. Each entry names the actor.
 
 ## 9. Sparse workspaces
 
