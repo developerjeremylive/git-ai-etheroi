@@ -1,14 +1,16 @@
 package manager
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/feder-cr/git-ai/internal/featureflag"
 	"github.com/feder-cr/git-ai/internal/git"
 	"github.com/feder-cr/git-ai/internal/git/gittest"
 	"github.com/feder-cr/git-ai/internal/git/housekeeping"
@@ -17,6 +19,7 @@ import (
 	gitalycfgprom "github.com/feder-cr/git-ai/internal/gitaly/config/prometheus"
 	"github.com/feder-cr/git-ai/internal/testhelper"
 	"github.com/feder-cr/git-ai/internal/testhelper/testcfg"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
@@ -44,9 +47,34 @@ func setupPackRefsRepository(t *testing.T, ctx context.Context, backend git.Refe
 
 func alwaysPackReferences(context.Context) bool { return true }
 
-// TestPackRefsIfNeeded_reftableContention runs the real git-pack-refs(1) while reftable's
-// tables.list.lock is held, as a concurrent writer holds it, and pins the exit codes and stderr that
-// isReftableContention classifies: a git that changes them fails here.
+// forEachBundledGit runs test once with each bundled git, master and prev, selected by the feature
+// flag in the context, instead of the one testhelper.Context picks at random: the reftable
+// contention errors differ between them.
+func forEachBundledGit(t *testing.T, test func(t *testing.T, ctx context.Context)) {
+	t.Helper()
+
+	gitCmdFactory := gittest.NewCommandFactory(t, testcfg.Build(t))
+	versions := map[bool]string{}
+	for _, master := range []bool{true, false} {
+		version, err := gitCmdFactory.GitVersion(featureflag.ContextWithFeatureFlag(testhelper.Context(t), featureflag.GitMaster, master))
+		require.NoError(t, err)
+		versions[master] = version
+	}
+	require.NotEqual(t, versions[true], versions[false], "the feature flag does not select another git")
+
+	for _, master := range []bool{true, false} {
+		t.Run(testhelper.DependingOn(master, "git-master", "git-prev"), func(t *testing.T) {
+			t.Parallel()
+			t.Logf("git %s", versions[master])
+
+			test(t, featureflag.ContextWithFeatureFlag(testhelper.Context(t), featureflag.GitMaster, master))
+		})
+	}
+}
+
+// TestPackRefsIfNeeded_reftableContention runs the real git-pack-refs(1) of both bundled gits while
+// reftable's tables.list.lock is held, as a concurrent writer holds it, and pins the exit codes and
+// stderr that isReftableContention classifies: a git that changes them fails here.
 func TestPackRefsIfNeeded_reftableContention(t *testing.T) {
 	t.Parallel()
 
@@ -71,26 +99,102 @@ func TestPackRefsIfNeeded_reftableContention(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := testhelper.Context(t)
-			repo, repoPath := setupPackRefsRepository(t, ctx, git.ReferenceBackendReftables, tc.tables)
-			manager := New(gitalycfgprom.Config{}, testhelper.NewLogger(t), nil, nil)
-			strategy := mockOptimizationStrategy{shouldRepackReferences: alwaysPackReferences}
+			forEachBundledGit(t, func(t *testing.T, ctx context.Context) {
+				repo, repoPath := setupPackRefsRepository(t, ctx, git.ReferenceBackendReftables, tc.tables)
+				manager := New(gitalycfgprom.Config{}, testhelper.NewLogger(t), nil, nil)
+				strategy := mockOptimizationStrategy{shouldRepackReferences: alwaysPackReferences}
 
-			lockPath := filepath.Join(repoPath, "reftable", "tables.list.lock")
-			require.NoError(t, os.WriteFile(lockPath, nil, 0o644))
+				lockPath := filepath.Join(repoPath, "reftable", "tables.list.lock")
+				require.NoError(t, os.WriteFile(lockPath, nil, 0o644))
 
-			didPackRefs, err := manager.packRefsIfNeeded(ctx, repo, strategy)
-			require.ErrorIs(t, err, errReftableCompactionContended)
-			require.EqualError(t, err, tc.expectedErr)
-			require.False(t, didPackRefs)
+				didPackRefs, err := manager.packRefsIfNeeded(ctx, repo, strategy)
+				require.ErrorIs(t, err, errReftableCompactionContended)
+				require.EqualError(t, err, tc.expectedErr)
+				require.False(t, didPackRefs)
 
-			// Once the writer is gone, the stack is compacted into a single table.
-			require.NoError(t, os.Remove(lockPath))
-			didPackRefs, err = manager.packRefsIfNeeded(ctx, repo, strategy)
-			require.NoError(t, err)
-			require.True(t, didPackRefs)
-			tablesList := testhelper.MustReadFile(t, filepath.Join(repoPath, "reftable", "tables.list"))
-			require.Equal(t, 1, bytes.Count(tablesList, []byte("\n")))
+				// Once the writer is gone, the stack is compacted into a single table.
+				require.NoError(t, os.Remove(lockPath))
+				didPackRefs, err = manager.packRefsIfNeeded(ctx, repo, strategy)
+				require.NoError(t, err)
+				require.True(t, didPackRefs)
+				require.Len(t, reftableTables(t, repoPath), 1)
+			})
+		})
+	}
+}
+
+// reftableTables returns the tables of the reftable stack of the repository at repoPath.
+func reftableTables(t *testing.T, repoPath string) []string {
+	t.Helper()
+
+	return strings.Fields(string(testhelper.MustReadFile(t, filepath.Join(repoPath, "reftable", "tables.list"))))
+}
+
+// TestOptimizeRepository_staleReftableTableLock leaves the lock of a table being compacted behind, as
+// a git killed during the compaction does, and checks that housekeeping recovers: once the lock is
+// older than the grace period, CleanStaleData removes it and the stack is compacted again. While it
+// is fresh, it is a concurrent compaction: the lock stays and the reference packing is skipped.
+func TestOptimizeRepository_staleReftableTableLock(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		desc               string
+		age                time.Duration
+		expectedLock       bool
+		expectedPackedRefs map[string]float64
+		expectedTables     int
+	}{
+		{
+			desc:               "fresh lock",
+			age:                0,
+			expectedLock:       true,
+			expectedPackedRefs: map[string]float64{"success": 1, "skipped": 1},
+			expectedTables:     2,
+		},
+		{
+			desc:               "stale lock",
+			age:                housekeeping.ReftableLockfileGracePeriod + time.Minute,
+			expectedLock:       false,
+			expectedPackedRefs: map[string]float64{"success": 2, "skipped": 0},
+			expectedTables:     1,
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
+
+			forEachBundledGit(t, func(t *testing.T, ctx context.Context) {
+				repo, repoPath := setupPackRefsRepository(t, ctx, git.ReferenceBackendReftables, 10)
+
+				// The lock of the oldest table: a compaction locks the tables from the newest
+				// down, so git compacts the newer ones around it, and the oldest table and the
+				// compacted one stay apart for as long as the lock is there.
+				lockPath := filepath.Join(repoPath, "reftable", reftableTables(t, repoPath)[0]+".lock")
+				require.NoError(t, os.WriteFile(lockPath, nil, 0o644))
+				lockTime := time.Now().Add(-tc.age)
+				require.NoError(t, os.Chtimes(lockPath, lockTime, lockTime))
+
+				manager := New(gitalycfgprom.Config{}, testhelper.NewLogger(t), nil, nil)
+				optimize := func() {
+					require.NoError(t, manager.OptimizeRepository(ctx, repo, WithOptimizationStrategyConstructor(
+						func(stats.RepositoryInfo) housekeeping.OptimizationStrategy {
+							return mockOptimizationStrategy{shouldRepackReferences: alwaysPackReferences}
+						},
+					)))
+				}
+
+				// The first run compacts the tables newer than a held lock; the second finds only
+				// the locked table and the compacted one, and cannot compact them.
+				optimize()
+				optimize()
+
+				_, err := os.Stat(lockPath)
+				require.Equal(t, tc.expectedLock, err == nil, "lock exists: %v", err)
+				require.Len(t, reftableTables(t, repoPath), tc.expectedTables)
+				for status, count := range tc.expectedPackedRefs {
+					require.Equal(t, count, testutil.ToFloat64(
+						manager.metrics.TasksTotal.WithLabelValues("packed_refs", status)), status)
+				}
+			})
 		})
 	}
 }

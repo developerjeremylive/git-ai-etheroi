@@ -571,20 +571,28 @@ func (m *RepositoryManager) packRefsIfNeeded(ctx context.Context, repo *localrep
 var errReftableCompactionContended = errors.New("reftable compaction contended")
 
 // Exit codes and stderr of git-pack-refs(1) on a reftable repository when the stack is contended.
-// They are git internals, read from git 2.56.0-rc1 (3bbf434) and 2.55.0-rc1 (1ea786d), the bundled
-// builds, and pinned by TestPackRefsIfNeeded_reftableContention against the real git:
+// They are git internals, read from the bundled builds, git 2.56.0-rc1 (3bbf434, "master") and
+// 2.55.0-rc1 (1ea786d, "prev"). TestPackRefsIfNeeded_reftableContention pins 251 and 255 "data is
+// locked" against both; 244 and 255 "data concurrently modified" need a writer racing pack-refs,
+// which TestWriteCommitGraphIfIdle_ConcurrentWithOptimizeRepository runs with both, without
+// guaranteeing the race in a given run:
 //
-//   - reftable_be_optimize (refs/reftable-backend.c:1699) returns what reftable_stack_clean
-//     (reftable/stack.c:1845) returns as is, and git exits with it modulo 256 and an empty stderr:
-//     REFTABLE_LOCK_ERROR (-5) when tables.list.lock is held, REFTABLE_OUTDATED_ERROR (-12) when
-//     the stack changed under it (reftable/reftable-error.h).
+//   - reftable_be_optimize (refs/reftable-backend.c:1699 in master, :1656 in prev) returns what
+//     reftable_stack_clean (reftable/stack.c:1845 in master, :1807 in prev) returns as is, and git
+//     exits with it modulo 256 and an empty stderr. reftable_stack_clean takes tables.list.lock
+//     without waiting (no write options, so reftable.lockTimeout does not apply) and fails with
+//     REFTABLE_LOCK_ERROR (-5, exit 251) when a writer holds it. Only prev also fails with
+//     REFTABLE_OUTDATED_ERROR (-12, exit 244) when a writer changed the stack since pack-refs read
+//     it (reftable_stack_init_addition); master reloads the stack there instead. Both codes are in
+//     reftable/reftable-error.h.
 //   - When the compaction itself fails, reftable_be_optimize reports it with error(), exiting 255,
 //     and "unable to compact stack: <reftable_error_str>", whose texts for these two errors come
 //     from reftable/error.c.
 //
 // git's own auto-compaction treats both errors as benign (reftable/stack.c:833). A lock left by a
-// crashed git is no reason to retry here either: CleanStaleData removes tables.list.lock once it is
-// older than housekeeping.ReftableLockfileGracePeriod, before the next pack-refs runs.
+// git process that died is not contention that passes: CleanStaleData removes the locks of
+// tables.list and of single tables once they are older than
+// housekeeping.ReftableLockfileGracePeriod, before pack-refs runs.
 const (
 	reftableLockErrorExitCode     = 256 - 5
 	reftableOutdatedErrorExitCode = 256 - 12

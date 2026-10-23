@@ -128,11 +128,16 @@ func TestWriteCommitGraphIfIdle(t *testing.T) {
 
 // TestWriteCommitGraphIfIdle_ConcurrentWithOptimizeRepository runs background commit-graph writes
 // while OptimizeRepository writes the commit-graph of the same repository. Without the shared
-// guard, one of the two failed on the commit-graph chain lock in most rounds.
+// guard, one of the two failed on the commit-graph chain lock in most rounds. On reftable the
+// commits race OptimizeRepository's git-pack-refs(1) too, whose contention errors differ between the
+// bundled gits: the test runs with both.
 func TestWriteCommitGraphIfIdle_ConcurrentWithOptimizeRepository(t *testing.T) {
 	t.Parallel()
 
-	ctx := testhelper.Context(t)
+	forEachBundledGit(t, testWriteCommitGraphIfIdleConcurrentWithOptimizeRepository)
+}
+
+func testWriteCommitGraphIfIdleConcurrentWithOptimizeRepository(t *testing.T, ctx context.Context) {
 	cfg := testcfg.Build(t)
 
 	repoProto, repoPath := gittest.CreateRepository(t, ctx, cfg, gittest.CreateRepositoryConfig{

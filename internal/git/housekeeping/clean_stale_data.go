@@ -491,24 +491,46 @@ func FindStaleReferenceLocks(gracePeriod time.Duration) FindStaleFileFunc {
 	}
 }
 
-// FindStaleReftableLock provides a function which scans the reftable folder
-// for stale a reftable lock and deletes it.
+// FindStaleReftableLock provides a function which scans the reftable folder for the locks git's
+// reftable stack takes that are older than ReftableLockfileGracePeriod, left by a git process that
+// died: the lock of tables.list, and the lock of a table being compacted, <table>.ref.lock
+// (flock_acquire in reftable/stack.c). A stale table lock keeps every later compaction from
+// compacting that table, so git-pack-refs(1) fails on each housekeeping until it is gone.
 func FindStaleReftableLock(_ context.Context, repoPath string) ([]string, error) {
-	lockPath := filepath.Join(repoPath, "reftable", "tables.list.lock")
-	stat, err := os.Stat(lockPath)
+	reftablePath := filepath.Join(repoPath, "reftable")
+	entries, err := os.ReadDir(reftablePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 
-		return nil, fmt.Errorf("statting reftable lock: %w", err)
+		return nil, fmt.Errorf("reading reftable directory: %w", err)
 	}
 
-	if time.Since(stat.ModTime()) < ReftableLockfileGracePeriod {
-		return nil, nil
+	var staleLocks []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if name != "tables.list.lock" && !strings.HasSuffix(name, ".ref.lock") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+
+			return nil, fmt.Errorf("statting reftable lock: %w", err)
+		}
+
+		if time.Since(info.ModTime()) < ReftableLockfileGracePeriod {
+			continue
+		}
+
+		staleLocks = append(staleLocks, filepath.Join(reftablePath, name))
 	}
 
-	return []string{lockPath}, nil
+	return staleLocks, nil
 }
 
 func removeUnnecessaryConfig(ctx context.Context, repository *localrepo.Repo, txManager transaction.Manager) (int, error) {
