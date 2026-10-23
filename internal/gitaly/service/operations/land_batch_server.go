@@ -255,7 +255,8 @@ type serverLandBatchStepper struct {
 func (st *serverLandBatchStepper) Land(ctx context.Context, tip git.ObjectID, req *landBatchRequest) (landStep, error) {
 	defer observeLandBatchPhase(landBatchPhaseLandMember, time.Now())
 
-	step, err := st.decide(ctx, tip, req)
+	// The member's own policy checks during the attempt decide with the policy that admits it.
+	step, err := st.decide(policystore.WithSnapshot(ctx, st.policy), tip, req)
 	if err != nil {
 		return step, err
 	}

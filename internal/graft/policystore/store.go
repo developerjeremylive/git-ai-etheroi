@@ -264,3 +264,18 @@ func AdmissionGeneration(ctx context.Context) uint64 {
 	generation, _ := ctx.Value(admissionKey{}).(uint64)
 	return generation
 }
+
+type snapshotKey struct{}
+
+// WithSnapshot returns ctx carrying the policy snapshot that decides the checks made with it: a
+// land batch attempt admits each member with one snapshot, and the member's own checks during the
+// attempt, such as the policy check before a resolution, use the same one (PLAN12, section 5).
+func WithSnapshot(ctx context.Context, snapshot *Snapshot) context.Context {
+	return context.WithValue(ctx, snapshotKey{}, snapshot)
+}
+
+// SnapshotFrom returns the snapshot of WithSnapshot, if ctx carries one.
+func SnapshotFrom(ctx context.Context) (*Snapshot, bool) {
+	snapshot, ok := ctx.Value(snapshotKey{}).(*Snapshot)
+	return snapshot, ok && snapshot != nil
+}

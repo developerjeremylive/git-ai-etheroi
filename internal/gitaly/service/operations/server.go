@@ -168,10 +168,15 @@ func (s *Server) ensureStorageFresh(ctx context.Context, repo *gitalypb.Reposito
 	return s.storageSync.EnsureFresh(ctx, repo)
 }
 
-// graftInForce returns the [graft] configuration with the standalone access policy in force: the
-// policy checks of the RPCs decide with the policy the server holds now.
-func (s *Server) graftInForce() config.Graft {
+// graftInForce returns the [graft] configuration with the standalone access policy that decides the
+// policy checks of ctx: the snapshot ctx carries, which a land batch attempt gives its members
+// (policystore.WithSnapshot), or else the policy the server holds now.
+func (s *Server) graftInForce(ctx context.Context) config.Graft {
 	graft := s.graft
-	graft.Policy = s.graftPolicy.Current().Rules
+	if snapshot, ok := policystore.SnapshotFrom(ctx); ok {
+		graft.Policy = snapshot.Rules
+	} else {
+		graft.Policy = s.graftPolicy.Current().Rules
+	}
 	return graft
 }

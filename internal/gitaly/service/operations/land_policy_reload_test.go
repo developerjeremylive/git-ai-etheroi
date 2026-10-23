@@ -141,7 +141,7 @@ func testUserLandPolicyReloadedInFlight(t *testing.T, ctx context.Context) {
 		require.ElementsMatch(t, []string{"base", "b"}, mainFiles(t, cfg, repoPath))
 	})
 
-	t.Run("a batch admitted under another policy is admitted again, and the newly denied member fails alone", func(t *testing.T) {
+	t.Run("a batch admitted under another policy lands its requests alone, and the newly denied one fails alone", func(t *testing.T) {
 		t.Parallel()
 
 		ctx, cfg, client, reloader := setupPolicyReload(t, ctx, agentBatchingGraft(3, nil))
@@ -379,4 +379,24 @@ func testUserLandPolicyReloadsDuringConcurrentLands(t *testing.T, ctx context.Co
 	}
 
 	require.Len(t, mainFiles(t, cfg, repoPath), 1+landsPerAgent*(agents-1)+landed["agent-0"])
+}
+
+// TestServer_graftInForce: a policy check decides with the snapshot its context carries, which a
+// land batch attempt gives its members, even after a reload; without one, with the policy in force.
+func TestServer_graftInForce(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	admitting := []config.GraftPolicyRule{{Actor: "*", Allow: true}}
+	reloaded := denyMainFor("bot")
+	store := policystore.New(admitting)
+	s := &Server{graft: config.Graft{Standalone: true}, graftPolicy: store}
+	snapshot := store.Current()
+
+	outcome, err := store.Reload(config.Graft{Standalone: true, Policy: reloaded}, config.Graft{Standalone: true})
+	require.NoError(t, err)
+	require.Equal(t, policystore.Applied, outcome.Result)
+
+	require.Equal(t, reloaded, s.graftInForce(ctx).Policy)
+	require.Equal(t, admitting, s.graftInForce(policystore.WithSnapshot(ctx, snapshot)).Policy)
 }

@@ -91,8 +91,16 @@ The one exception today is the land batch: the hook does not re-check a batch's 
 the batch's commit would not apply to it. Fix: the batch records the generation it admitted
 its members under, and carries it in the hooks payload of its combined update; the hook refuses
 a batch update whose admission generation is not the current one (`policy changed during the
-batch`), and the batch executor rebuilds (its existing rebuild path), admitting every member
-again under the new snapshot. A member the new policy denies then fails alone, as today.
+batch`), and the batch executor treats it as a refused combined update: each of its requests
+lands alone, decided by its pre-receive check and the hook under the policy in force. A member
+the new policy denies then fails alone, as today. (As implemented: the requests land alone, the
+fallback of a refused batch, rather than in a rebuilt batch; a batch of N then costs N lands
+after a reload.)
+
+Within one batch attempt, every policy check of a member (its admission, and the policy check
+before a resolution) decides with the snapshot the attempt took when it started, so that one
+member is never judged by two generations. A loosening during an attempt applies to the members
+of the next attempt; a member denied by the attempt's snapshot is denied, and the client retries.
 
 Callers that are not agents (shared token, unauthenticated) are checked only by pre-receive,
 before the references are locked: a swap between their pre-receive and their commit can let one
@@ -144,7 +152,7 @@ closed.
     the hook; the branch is unchanged;
   - loosening: an agent refused, the policy reloaded to allow it, the same land again → lands;
   - batch: a batch whose admission generation changes before its commit → the hook refuses the
-    combined update, the batch rebuilds under the new policy, the newly denied member fails
+    combined update, its requests land alone under the new policy, the newly denied member fails
     alone, the others land.
 - (PM) An invalid policy reloaded while agents land: no decision is ever taken without a policy
   (no nil snapshot, no empty rule list where the startup policy had rules); every land is decided

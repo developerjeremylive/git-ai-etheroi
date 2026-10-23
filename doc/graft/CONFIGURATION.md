@@ -124,7 +124,9 @@ with the graceful-upgrade bootstrap.
   reference-transaction hook runs, while git holds the references' locks: a
   tightening applies to it even if its earlier checks allowed it. A land batch
   whose members were admitted under another policy is refused there, and its
-  requests land alone, each decided by the policy in force.
+  requests land alone, each decided by the policy in force. A batch attempt
+  judges each of its members with the policy in force when the attempt
+  started: a loosening reaches the members of the next attempt.
 - Each node reloads its own file: reload every node, then compare their
   `graft_policy_info`.
 
