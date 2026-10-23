@@ -102,7 +102,16 @@ func (s *Server) userApplyPatch(ctx context.Context, header *gitalypb.UserApplyP
 		return structerr.NewInvalidArgument("%w", err)
 	}
 
-	patchedCommit, err := s.applyPatchesWithIndex(ctx, repo, parentCommitID, committerSignature, stream)
+	// The patches are written into a quarantine, which the reference update migrates: a loose object
+	// written straight into the repository would race housekeeping's removal of empty loose object
+	// directories, which the migration survives.
+	quarantineDir, quarantineRepo, cleanup, err := s.quarantinedRepo(ctx, header.GetRepository())
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	patchedCommit, err := s.applyPatchesWithIndex(ctx, quarantineRepo, parentCommitID, committerSignature, stream)
 	if err != nil {
 		return err
 	}
@@ -131,7 +140,7 @@ func (s *Server) userApplyPatch(ctx context.Context, header *gitalypb.UserApplyP
 		}
 	}
 
-	if err := s.updateReferenceWithHooks(ctx, header.GetRepository(), header.GetUser(), nil, targetBranch, patchedCommit, currentCommit); err != nil {
+	if err := s.updateReferenceWithHooks(ctx, header.GetRepository(), header.GetUser(), quarantineDir, targetBranch, patchedCommit, currentCommit); err != nil {
 		return fmt.Errorf("update reference: %w", err)
 	}
 
