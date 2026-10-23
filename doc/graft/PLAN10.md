@@ -2618,6 +2618,37 @@ The paired exact tests on the discordant files (landed-wrong: A only against B o
 4. *The label is an AI reference, not a human one* (the PM label of 15.23, calibrated 78.3% on TypeScript, so under its own 80% criterion). The PM's rubric counts UNCLEAR and any disagreement as wrong (none occurred here).
 5. *Nothing is promoted:* the code (`renames_context`, default off) stays on branch `c1-renames` and is not merged into main. The data, scripts and verdicts are in `c1-work/run/renames/` and `c1-work/scripts/rn_*.py` (report script sha256 `36979f49f13e`), outside the repository.
 
+### 15.26 G1 on agent-PR conflicts in Go, Python and TypeScript, under the PM label (descriptive, small N, no goal; no paid call)
+
+**Label of this section: descriptive, small N, no goal, AI label, no objective rule.** It extends the PM label of 15.23-15.25 to the agent-PR files that G1 lands, to see how far the 43% wrong of 15.12 (two LLM judges, all languages) moves under the label that 15.24 used on OSS code. It is not a gate, it has no bar, and it supports no claim about a product.
+
+**The answer.** Of the 284 replayed agent-PR files (manifest-agent-284, the runs of 15.12), G1 lands 130; **65 are Go, Python or TypeScript/JavaScript** (Go 9, Python 11, TypeScript/JavaScript 45; the other 65 are in languages that have no label here and are not measured). Under the PM label **6 of the 65 are wrong: 9.2% (Wilson 95% interval 4.3-18.7)**:
+
+| group | N | wrong | rate (Wilson 95%) | identical to the developer's file |
+|---|---:|---:|---|---:|
+| Go, Python, TS/JS | 65 | 6 | 9.2% (4.3-18.7) | 27 (41.5%) |
+| Go | 9 | 0 | 0.0% (0.0-29.9) | 4 |
+| Python | 11 | 0 | 0.0% (0.0-25.9) | 3 |
+| TypeScript/JavaScript | 45 | 6 | 13.3% (6.3-26.2) | 20 |
+| without Tonomy-ID-SDK | 49 | 3 | 6.1% (2.1-16.5) | 22 |
+| without Tonomy-ID-SDK and eos | 40 | 3 | 7.5% (2.6-19.9) | 18 |
+| Tonomy-ID-SDK | 16 | 3 | 18.8% (6.6-43.0) | 5 |
+| eos (Go) | 9 | 0 | 0.0% (0.0-29.9) | 4 |
+
+The other repositories have at most 4 files each (calcom/cal.com 4, 0 wrong; Nounspace/nounspace.ts 4, 1 wrong; the rest 3 or fewer). **The intervals are wide: Go and Python, 0 of 9 and 0 of 11, cannot be told from a rate of 25%.** For comparison, on the OSS corpora of 15.24 and 15.18-15.19 the same G1 under the PM label was 12.7% (TypeScript, 323 files) and 7.3% (Python, 331 files); the TypeScript figure here, 13.3%, is within its interval.
+
+**How it was made.** G1 is the rule of every earlier run (both writers answered, byte-identical after normalization, clean composition reports, the verify simulator does not fail), recomputed from the stored runs of 15.12 (`scripts/ag_g1.py`, sha256 `54f617db528b`; list of the landed files `run/agent-desc/g1.json`, `daff1b17d5c1`), which gives the 130 and 65 above. The label (`scripts/ag_report.py`, `da150ad3cdd8`; `scripts/ag_prepare.py`, `1526d0650ee3`) is the PM label of 15.23: the answers identical to the developer's file (27) are right; one equal to it ignoring whitespace is right; the other 37 went, named by a key without the repository or the arm, as case files (`1b9108dc349b`, the batches `batches.json` `92c795af6120`) to blind Claude Opus reviewers with the rubric PROTOCOL-PMJUDGE `b99630b8…` verbatim, in two batches (18 and 19 cases) and a second review of 7 (every 5th). Verdict files, reasons verbatim: `out-0.jsonl` `6a8e56af1776` (18), `out-1.jsonl` `c5fde70578b8` (19), `out-second.jsonl` `87ab80044f75` (7). **There is no objective rule:** the frozen harnesses (15.15-15.24) have no tests, build or tsc recipe for the agent-PR repositories (Tonomy-ID-SDK and eos included), and none was built for this section. UNCLEAR and a disagreement between reviewers count as wrong.
+Verdicts of the 37: 31 correct, 5 wrong, 1 unclear (wrong in the count). The second review agrees on 6 of 7; the disagreement (a Tonomy-ID-SDK file: primary WRONG, rule 1, an import dropped; second reviewer CORRECT) is counted as wrong, as the protocol says, and is in the 6.
+
+**What the 6 wrong answers are** (reasons by the reviewers): three are Tonomy-ID-SDK files whose imports and calls come from both sides' two APIs (`tonomyContract` against `getTonomyContract()`, a dropped import, a stale import; rules 1-3, one UNCLEAR counted wrong); two are rule 4 (a change not adapted next to the conflict: a ts-jest `globals` block that OURS deleted and THEIRS' project config still uses; a drag-source helper that THEIRS replaced and OURS' new code still calls in the old form), in webqx and compiler-explorer; one is Nounspace/nounspace.ts, a prop (`spaceId`) kept from THEIRS next to the `spaceData` that OURS deliberately introduced in its place (rule 2; the second reviewer agrees).
+
+**Reading and caveats.**
+1. *The 43% of 15.12 and the 9.2% here are not the same measurement.* The old figure is two LLM judges on all 130 landed files in every language, against the recorded merge; this one is the PM label on the 65 files of three languages. The recorded resolution of an agent PR is often not the right answer (15.12: a third of the "wrong" answers were property of the ground truth); the PM label judges the answer against the three sides, and gives 31 correct among 37 that differ from the developer's.
+2. *Nothing here validates the label on agent-PR traffic.* The PM label was calibrated on Go (15.23) and failed its calibration on TypeScript by two cases (78.3% against 80%, 15.24); an AI reference, not a human one. With no test or build outcome to put beside it, the 6 wrong answers and the 31 correct ones are the reviewers' judgement alone.
+3. *Small N, one repository dominates.* Tonomy-ID-SDK is 16 of the 65 (and half of the 6 wrong); eos 9; the rest are tens of repositories of 1-4 files. The rate without the two biggest repositories is 7.5% (2.6-19.9). The 65 files are a subset of a replay of merged PRs (the conflicts that a person resolved), not a sample of agent traffic.
+4. *What it does not say:* it does not say the 20% bar of the closed goal is met on agent PRs (no bar is applied, N is below the 54 of the protocol for TypeScript alone and the upper bound of the whole group, 18.7%, is close to 20%); it does not cover the 65 landed files of other languages; and the task B of the plan, a run with tests on agent PRs, was not run (T of at least 54 is unreachable with the repositories that have a runnable suite).
+5. The data and scripts are in `c1-work/run/agent-desc/` and `c1-work/scripts/ag_*.py`, outside the repository. No API call was made.
+
 ### Appendix A: the measurement log of section 15
 
 What was run, when, on what, at what cost. Data, scripts and reports are in `c1-work/` (outside the repository:
