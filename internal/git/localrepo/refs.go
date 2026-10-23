@@ -203,6 +203,25 @@ func (repo *Repo) ResolveReferenceExactly(ctx context.Context, reference git.Ref
 	return git.ObjectID(value), nil
 }
 
+// ReflogExists reports whether the reference named reference has a reflog, with `git reflog
+// exists`, which reads that one reference's log: no DWIM rule.
+func (repo *Repo) ReflogExists(ctx context.Context, reference git.ReferenceName) (bool, error) {
+	var stderr bytes.Buffer
+	err := repo.ExecAndWait(ctx, gitcmd.Command{
+		Name:   "reflog",
+		Action: "exists",
+		Args:   []string{reference.String()},
+	}, gitcmd.WithStderr(&stderr))
+	if err == nil {
+		return true, nil
+	}
+	// reflog exists exits 1 for a reference without a reflog.
+	if code, ok := command.ExitStatus(err); ok && code == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("reflog exists %q: %w, stderr: %q", reference, err, stderr.String())
+}
+
 // badReferenceValue returns the value that show-ref --verify reports for reference in stderr when
 // the object of the reference is missing: "fatal: git show-ref: bad ref <reference> (<object ID>)".
 func badReferenceValue(stderr string, reference git.ReferenceName) (git.ObjectID, bool) {

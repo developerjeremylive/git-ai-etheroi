@@ -228,12 +228,15 @@ func (s *Server) UserRevert(ctx context.Context, req *gitalypb.UserRevertRequest
 //
 // The chosen reference is read once, to its value, and the suffix applies to that object ID: no
 // rule resolves the name again, so a reference that is dangling, or that goes away meanwhile, never
-// yields a decoy. A reflog suffix (@{n}) needs the name: it is resolved by the full name, and the
-// reference must still have the value read.
+// yields a decoy. A reflog suffix (@{n}) needs the name: the reference must have a reflog of its
+// own (reflogExists), since git would otherwise read the reflog of a decoy such as
+// refs/refs/heads/x; it is then resolved by the full name, and the reference must still have the
+// value read, else the request fails with errStartReferenceChanged, which a retry may not meet.
 func resolveStartBranch(
 	name string,
 	objectHash git.ObjectHash,
 	read func(git.ReferenceName) (git.ObjectID, error),
+	reflogExists func(git.ReferenceName) (bool, error),
 	resolve func(git.Revision) (git.ObjectID, error),
 ) (git.ObjectID, error) {
 	base, suffix := splitRevisionSuffix(name)
@@ -254,18 +257,34 @@ func resolveStartBranch(
 		return resolve(git.Revision(value.String() + suffix + "^{commit}"))
 	}
 
+	hasReflog, err := reflogExists(reference)
+	if err != nil {
+		return "", err
+	}
+	if !hasReflog {
+		return "", fmt.Errorf("reference %q has no reflog: %w", reference, git.ErrReferenceNotFound)
+	}
 	commit, err := resolve(git.Revision(reference.String() + suffix + "^{commit}"))
 	if err != nil {
 		return "", err
 	}
-	again, err := read(reference)
-	if err != nil {
-		return "", err
-	}
-	if again != value {
-		return "", fmt.Errorf("reference %q changed while its reflog was read", reference)
+	if again, err := read(reference); err != nil || again != value {
+		return "", fmt.Errorf("reference %q: %w", reference, errStartReferenceChanged)
 	}
 	return commit, nil
+}
+
+// errStartReferenceChanged is the error of a start reference that changed while its reflog was read.
+var errStartReferenceChanged = errors.New("the reference changed while its reflog was read")
+
+// startRefError returns the error of a start branch that resolveStartBranch failed to resolve: a
+// start reference that changed meanwhile is a failed precondition, which a retry may not meet, and
+// anything else an invalid argument.
+func startRefError(err error) error {
+	if errors.Is(err, errStartReferenceChanged) {
+		return structerr.NewFailedPrecondition("resolve start ref: %w", err)
+	}
+	return structerr.NewInvalidArgument("resolve start ref: %w", err)
 }
 
 // startReference returns the reference that git resolves the name to, with the deviation of
@@ -368,6 +387,9 @@ func (s *Server) fetchStartRevision(
 	read := func(name git.ReferenceName) (git.ObjectID, error) {
 		return localRepo.ResolveReferenceExactly(ctx, name)
 	}
+	reflogExists := func(name git.ReferenceName) (bool, error) {
+		return localRepo.ReflogExists(ctx, name)
+	}
 	resolve := func(revision git.Revision) (git.ObjectID, error) {
 		return localRepo.ResolveRevision(ctx, revision)
 	}
@@ -380,6 +402,11 @@ func (s *Server) fetchStartRevision(
 		read = func(name git.ReferenceName) (git.ObjectID, error) {
 			return remoteRepo.ReadReference(ctx, name)
 		}
+		// No RPC tells whether a reference of the start repository has a reflog of its own, so a
+		// reflog entry of one is not taken there: git could read a decoy's reflog for it.
+		reflogExists = func(git.ReferenceName) (bool, error) {
+			return false, nil
+		}
 		resolve = func(revision git.Revision) (git.ObjectID, error) {
 			return remoteRepo.ResolveRevision(ctx, revision)
 		}
@@ -389,9 +416,9 @@ func (s *Server) fetchStartRevision(
 		return "", structerr.NewInternal("detecting object hash: %w", err)
 	}
 
-	startRevision, err := resolveStartBranch(string(startBranchName), objectHash, read, resolve)
+	startRevision, err := resolveStartBranch(string(startBranchName), objectHash, read, reflogExists, resolve)
 	if err != nil {
-		return "", structerr.NewInvalidArgument("resolve start ref: %w", err)
+		return "", startRefError(err)
 	}
 
 	if req.GetStartRepository() == nil {

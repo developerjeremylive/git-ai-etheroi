@@ -806,6 +806,36 @@ func TestStartBranchResolvesTheBranchFirst(t *testing.T) {
 		})
 	}
 
+	t.Run("cherry-pick, main@{1} with a reflog of its own", func(t *testing.T) {
+		t.Parallel()
+
+		// main's reflog holds other, then base: main@{1} is other.
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		other := gittest.WriteCommit(t, cfg, setup.repoPath, gittest.WithMessage("other"), gittest.WithParents(setup.base),
+			gittest.WithTreeEntries(baseFile, gittest.TreeEntry{Path: "other", Mode: "100644", Content: "other\n"}))
+		gittest.Exec(t, cfg, "-C", setup.repoPath, "update-ref", "--create-reflog", git.DefaultRef.String(), other.String())
+		gittest.Exec(t, cfg, "-C", setup.repoPath, "update-ref", "--create-reflog", git.DefaultRef.String(), setup.base.String())
+
+		resp, err := cherryPick(setup, git.DefaultBranch+"@{1}")
+		require.NoError(t, err)
+		require.Equal(t, other.String(), parentsOf(t, cfg, setup.repoPath, resp.GetBranchUpdate().GetCommitId()))
+	})
+
+	t.Run("cherry-pick, main@{1} with only a decoy's reflog", func(t *testing.T) {
+		t.Parallel()
+
+		// main has no reflog, and refs/refs/heads/main has one, which git would read for
+		// refs/heads/main@{1}.
+		setup := setupCherryPickOrRevert(t, ctx, cfg)
+		decoy := writeDecoy(t, cfg, setup.repoPath, "refs/refs/heads/main", baseFile)
+		gittest.Exec(t, cfg, "-C", setup.repoPath, "update-ref", "--create-reflog", "refs/refs/heads/main", decoy.String())
+		gittest.Exec(t, cfg, "-C", setup.repoPath, "update-ref", "--create-reflog", "refs/refs/heads/main", setup.base.String())
+
+		_, err := cherryPick(setup, git.DefaultBranch+"@{1}")
+		testhelper.RequireGrpcCode(t, err, codes.InvalidArgument)
+		require.ErrorContains(t, err, "has no reflog")
+	})
+
 	t.Run("cherry-pick, a dangling symbolic branch by its full name", func(t *testing.T) {
 		t.Parallel()
 
@@ -890,6 +920,8 @@ func TestResolveStartBranch(t *testing.T) {
 		expected string
 		// noLookup tells that the name must not be looked up as a reference.
 		noLookup bool
+		// reflogs are the references that have a reflog of their own.
+		reflogs []string
 	}{
 		{name: "main", refs: []string{"refs/heads/main"}, expected: "v(refs/heads/main)^{commit}"},
 		{name: "main", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "v(refs/heads/main)^{commit}"},
@@ -917,8 +949,15 @@ func TestResolveStartBranch(t *testing.T) {
 		{name: "main~1", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "v(refs/heads/main)~1^{commit}"},
 		{name: "main:file", refs: []string{"refs/heads/main"}, expected: "v(refs/heads/main):file^{commit}"},
 		{name: "refs/tags/v1^{}", refs: []string{"refs/tags/v1"}, expected: "v(refs/tags/v1)^{}^{commit}"},
-		// A reflog suffix needs the name, which is read again afterwards.
-		{name: "main@{1}", refs: []string{"refs/tags/main", "refs/heads/main"}, expected: "refs/heads/main@{1}^{commit}"},
+		// A reflog suffix needs the name, which is read again afterwards, and a reflog of the
+		// reference's own: without one, git would read the reflog of a decoy.
+		{
+			name:     "main@{1}",
+			refs:     []string{"refs/tags/main", "refs/heads/main"},
+			reflogs:  []string{"refs/heads/main"},
+			expected: "refs/heads/main@{1}^{commit}",
+		},
+		{name: "main@{1}", refs: []string{"refs/heads/main", "refs/refs/heads/main"}, reflogs: []string{"refs/refs/heads/main"}, expected: "not found"},
 		{name: "refs/heads/x", refs: []string{"refs/refs/heads/x"}, expected: "not found"},
 		{name: "abc1234", expected: "abc1234^{commit}"},
 		{name: "@", expected: "@^{commit}"},
@@ -952,7 +991,16 @@ func TestResolveStartBranch(t *testing.T) {
 				return git.ObjectID(revision), nil
 			}
 
-			resolved, err := resolveStartBranch(tc.name, git.ObjectHashSHA1, read, resolve)
+			reflogExists := func(name git.ReferenceName) (bool, error) {
+				for _, reflog := range tc.reflogs {
+					if git.ReferenceName(reflog) == name {
+						return true, nil
+					}
+				}
+				return false, nil
+			}
+
+			resolved, err := resolveStartBranch(tc.name, git.ObjectHashSHA1, read, reflogExists, resolve)
 			if tc.expected == "not found" {
 				require.ErrorIs(t, err, git.ErrReferenceNotFound)
 			} else {
@@ -978,8 +1026,14 @@ func TestResolveStartBranch(t *testing.T) {
 			return git.ObjectID(revision), nil
 		}
 
-		_, err := resolveStartBranch("main@{1}", git.ObjectHashSHA1, read, resolve)
-		require.ErrorContains(t, err, "changed while its reflog was read")
+		reflogExists := func(git.ReferenceName) (bool, error) { return true, nil }
+
+		_, err := resolveStartBranch("main@{1}", git.ObjectHashSHA1, read, reflogExists, resolve)
+		require.ErrorIs(t, err, errStartReferenceChanged)
+		// The caller sees a failed precondition, which a retry may not meet, unlike the invalid
+		// argument of a start branch that does not resolve.
+		testhelper.RequireGrpcCode(t, startRefError(err), codes.FailedPrecondition)
+		testhelper.RequireGrpcCode(t, startRefError(git.ErrReferenceNotFound), codes.InvalidArgument)
 	})
 }
 
