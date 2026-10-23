@@ -2564,6 +2564,60 @@ the case file does not show, and it says nothing about the wrong answers that pa
 4. *Prettier is the weak repository* (26 of 142 wrong, 22 of them rule 4): its source is JavaScript with no type check and its formatter tests relate to few files; without prettier the no-tests figure is 8.3%.
 5. *First application of the PM label to data it was not designed on*, but it was calibrated only on Go and checked here by a criterion that it missed. The comparison with v1 does not exist on TypeScript (no judge was run).
 
+### 15.25 Showing the writer the renames made outside the conflict: not better (measured, $0.57 booked)
+
+**The answer.** The pre-registered primary test is **not met: B (`renames_context`) is not better than A.** On the 252 files that have a conflict region next to a rename the other side made outside it, B lands 11 wrong answers against A's 17 (6 fewer), but it also lands 5 fewer right ones
+(121 against 126), and the protocol allows a loss of 2. The gain in wrong answers is not significant (exact McNemar on the discordant files, 11 against 5: p = 0.21) and, on the part where the noise was measured (TypeScript + Python), it is 2 files against a noise measure of 1. **The honest reading is "a small possible reduction of wrong answers, paid for by landing fewer files, not distinguishable from noise".**
+`renames_context` stays **off by default** (as the PM conditioned); nothing here changes the closed results of 15.15-15.24.
+
+**What was tested.** Many of the "rule 4" verdicts (a change not adapted next to the conflict, 15.24) have a common shape: one side renamed an identifier outside the conflict region, the other side's lines inside it, or next to it, still use the old name. B shows the writer those renames and lets it rewrite the listed lines.
+* *The method* (`renames_context`, `tools/graft-agents/resolve/llm_renames.go`, branch `c1-renames`, commits 377d378 and 0426960, default off, in `LLMOptions.RenamesContext` and the strategy option `renames_context`): a rename is a token substitution R to A (a name or a dotted path of at most 3 tokens) in the paired lines of a base-to-side hunk that lies **outside every conflict region**, with R absent from the whole side file and present in the region's base, ours or theirs. The prompt lists the rename and up to 12 "uses" (lines of the merged text that still contain R, not written by the renaming side, not written by both), at most 6 renames per region, and accepts
+  `===== BEGIN ADJACENT EDIT <nonce> L<n> =====` blocks: a listed line, 1-3 lines, at most 2 KB, no markers, applying a listed rename (contains A, no longer R). Edits proposed for the same line by different regions that disagree are both dropped; the whole set is dropped if it breaks the syntax check; everything is in the composition report.
+* *Verification of the code* (before any paid call): an independent reference implementation of the extraction in Python (`scripts/rename_ref.py`) was compared with the Go code on 1,522 files with conflicts: **0 differences after one bug the comparison found** (the tokeniser read a multi-line text as one string; fixed in 0426960 and re-compared). Unit tests for each refusal reason, and a mutation run (`tsw/mutate_renames.py`): the non-compiling mutations were rewritten, three survivors were killed by asserting the refusal reasons.
+* *Protocol, hashed before the first paid call* (`run/renames/PROTOCOL-RENAMES.txt`, sha256 `2e423e21d05a57c96f59c3c442837f6b6a3102b1dedde25a7b31282692364dfd`; freezes `FREEZE.txt` a7c23116edd1, `FREEZE-2.txt` a5e94aae; binary `bin/graft-resolve-renames` sha256 `0b303ec7…`, A's binary `056745e3…`): the affected files of four sets, the same two writers (Luna, glm-5.3-flash), the same gate G1, A = prompt of record, flag off, B = the same plus the flag, and **A' = A run once more with the new binary, on TypeScript and Python only, as the noise control**. The affected files: tsfresh 131 of 532 (25%), pyfresh 54 of 501 (11%), go-fresh 53 of 290 (18%), go-heldout 14 of 199 (7%): 252.
+  The label is the PM label: the objective rule first (tests, build or tsc FAIL where the developer's file passes is wrong), the answers identical to the developer's are right, and for the other new answers (and for A's Go answers on the affected files, which had no PM label yet) the blind Claude Opus reviewers of 15.23 with the rubric PROTOCOL-PMJUDGE b99630b8…, judging from case files named by a key **without the arm**. An UNCLEAR or a disagreement counts as wrong.
+* *Disclosed before the run:* tsfresh and pyfresh are the data the rule was tuned on (their gain would not be a held-out result); go-fresh was seen in the first prototype's count only; **go-heldout is the cleanest** (14 affected files). The Go reading uses the TypeScript + Python noise band, as A' was not run for Go.
+* *Prediction written before the data:* W_B < W_A by about 3-6 files, R_B about R_A, a noise band of 2-4, "a realistic outcome is that B is not distinguishable from noise". The reduction of W (6) was at the top of the range; the loss of R (5) was not predicted.
+
+**Cost.** Booked **$0.5738** (key $0.5459, from 10.2342 to 10.7801), against a cap of $0.6 (B and A' on TypeScript $0.075-0.085 per writer, Python $0.033-0.039, Go fresh $0.045-0.051, Go held-out $0.011). Each stage was gated on the key delta against the booked cost; no deviation. The tests, builds, tsc and the reviewers cost no API spend.
+
+**What the arms did.** B changes the answer on a minority of the affected files: there are only 15 distinct new answers (not the answer A landed, not the developer's file): B 12 (8 TypeScript, 1 Python, 2 Go fresh, 1 Go held-out), A' 5 (4 TypeScript, 1 Python), of which one TypeScript and one Python answer are common to B and A'; 3 of them are equal to the developer's file ignoring whitespace (accepted without a reviewer). The adjacent edits of the B runs, from the composition reports: **45 proposed, 37 applied** (TypeScript 25 / 23, Python 2 / 2, Go 18 / 12), none refused by the validator; the other 8 were proposed and not applied.
+Blind labels: 25 case files went to the reviewers, the 12 new answers that needed one plus 13 answers that A landed on the affected Go files (they had no PM label yet): **10 correct, 15 wrong, 0 unclear** (two reviewers, 13 and 12 cases; a third re-judged every 5th case: **5 of 5 agree**; list of the batches `batches.json` sha256 `bcfb5da3…`). The reasons of the verdicts in `run/renames/pm/out-0.jsonl` (sha256 `72f59ea3b87d`) and `out-second.jsonl` (`9a9701bdae81`) were **shortened by the PM for the file; the verdicts and the rules are the reviewers' own**.
+
+**The result** (R landed right, W landed wrong, N not landed; the affected files only):
+
+| set | files | A: R / W / N | B: R / W / N | A': R / W / N |
+|---|---:|---|---|---|
+| tsfresh | 131 | 69 / 5 / 57 | 68 / 5 / 58 | 62 / 6 / 63 |
+| pyfresh | 54 | 34 / 4 / 16 | 34 / 2 / 18 | 33 / 4 / 17 |
+| go-fresh | 53 | 18 / 5 / 30 | 14 / 3 / 36 | not run |
+| go-heldout | 14 | 5 / 3 / 6 | 5 / 1 / 8 | not run |
+| **TypeScript + Python** | 185 | 103 / 9 / 73 | 102 / 7 / 76 | 95 / 10 / 80 |
+| **all** | **252** | **126 / 17 / 109** | **121 / 11 / 120** | |
+
+The paired exact tests on the discordant files (landed-wrong: A only against B only; landed-right the same):
+
+| group | landed-wrong | p | landed-right | p |
+|---|---|---:|---|---:|
+| TypeScript + Python | 6 / 4 | 0.754 | 14 / 13 | 1.000 |
+| TypeScript | 3 / 3 | 1.000 | 11 / 10 | 1.000 |
+| Python | 3 / 1 | 0.625 | 3 / 3 | 1.000 |
+| Go fresh | 3 / 1 | 0.625 | 9 / 5 | 0.424 |
+| **Go held-out (cleanest, N small)** | 2 / 0 | 0.500 | 0 / 0 | 1.000 |
+| **all 252** | **11 / 5** | **0.210** | 23 / 18 | 0.533 |
+
+**The pre-registered primary test, as it comes out.**
+1. *W_B < W_A and R_B >= R_A - 2, pooled over the 252:* W 11 < 17 holds; **R 121 >= 124 does not (121 < 124): not met.** On TypeScript + Python alone R_B = 102 against R_A = 103 (met there); the loss is in Go fresh (18 to 14, nine files A lands right that B does not against five the other way).
+2. *The gain is outside the noise band, on TypeScript + Python:* W_A - W_B = 2 against |W_A - W_A'| = 1: **outside** by one file. The noise of R is larger, |R_A - R_A'| = 8: two runs of the same method differ by 8 landed-right files, more than the 5 B loses overall, so the loss of R is **itself inside the band measured on TypeScript and Python** (Go has no A'; the Go reading borrows that band).
+3. *The wrong rate over all landed files per language* (affected files as the arm lands them, the others as A): TypeScript/JavaScript A 41 of 323 = 12.7% (Wilson upper 16.8%), B 41 of 322 = 12.7% (16.8%); Python A 24 of 331 = 7.3% (10.6%), B 22 of 329 = 6.7% (9.9%): both under the 20% bar. **For Go the figure cannot be recomputed from this measurement:** the non-affected Go G1-landed files carry no PM label here (123 of them, labelled under the earlier rules of 15.15-15.17), so the script reports 22 of 435 / 18 of 427 with those 123 uncounted, which is not a figure to quote. The argument that stands without it: B changes only affected files, and in Go it lands 8 fewer files and 4 fewer wrong ones than A (W 8 to 4), so its rate cannot be higher than A's under any label of the unchanged files. Condition (3) is moot in any case, because (1) fails.
+
+**Reading and caveats.**
+1. *Answer to the question:* showing the writers the other side's renames and letting them rewrite the listed adjacent lines did **not** lower the wrong rate by a margin the measurement can separate from noise, and it cost landed-right files in Go. It is "not better", with a trend (W 17 to 11) that a larger paired set might confirm.
+2. *The mechanism works as designed* (45 edits proposed, 37 applied, none refused by the validator) *but is rarely the deciding factor:* B lands mostly the same answers as A; only 15 distinct answers are new. The comparison therefore rests on a few discordant files (16 wrong, 41 right), which is why the p-values are high.
+3. *Tuning data:* the TypeScript and Python gain, if any, is on the data the method was tuned on. The cleanest figure, Go held-out, has 14 files (A 3 wrong, B 1): a direction, not evidence.
+4. *The label is an AI reference, not a human one* (the PM label of 15.23, calibrated 78.3% on TypeScript, so under its own 80% criterion). The PM's rubric counts UNCLEAR and any disagreement as wrong (none occurred here).
+5. *Nothing is promoted:* `renames_context` is off by default in main. The code (default off) is on branch `c1-renames`; the data, scripts and verdicts are in `c1-work/run/renames/` and `c1-work/scripts/rn_*.py` (report script sha256 `36979f49f13e`), outside the repository.
+
 ### Appendix A: the measurement log of section 15
 
 What was run, when, on what, at what cost. Data, scripts and reports are in `c1-work/` (outside the repository:
