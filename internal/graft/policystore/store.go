@@ -159,11 +159,13 @@ func (s *Store) Reload(next config.Graft, running config.Graft) (Outcome, error)
 
 // publish puts snapshot in force and updates the gauges.
 func (s *Store) publish(snapshot *Snapshot) {
-	if previous := s.current.Swap(snapshot); previous != nil {
+	previous := s.current.Swap(snapshot)
+	s.generation.Set(float64(snapshot.Generation))
+	// The new series first: a scrape between the two sees the hash in force, never none.
+	s.info.WithLabelValues(snapshot.SHA256).Set(1)
+	if previous != nil && previous.SHA256 != snapshot.SHA256 {
 		s.info.DeleteLabelValues(previous.SHA256)
 	}
-	s.generation.Set(float64(snapshot.Generation))
-	s.info.WithLabelValues(snapshot.SHA256).Set(1)
 }
 
 // Hash returns the SHA-256 of rules in a canonical encoding: two policies with the same rules in
@@ -185,18 +187,38 @@ func Hash(rules []config.GraftPolicyRule) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// needsRestart names what differs between next and running outside the policy: a reload applies the
-// policy only.
+// needsRestart names the settings of the [graft] section that differ between next and running,
+// other than the policy: a reload applies the policy only.
 func needsRestart(next, running config.Graft) []string {
+	return changedSettings("graft.", next, running, "policy")
+}
+
+// NeedsRestartOutsideGraft names the settings outside the [graft] section that differ between the
+// configurations next and running, by their TOML keys: a reload does not apply them.
+func NeedsRestartOutsideGraft(next, running config.Cfg) []string {
+	return changedSettings("", next, running, "graft")
+}
+
+// changedSettings names, with prefix, the TOML keys of the fields of the structs next and running,
+// of one type, whose values differ, skipping the keys in skip.
+func changedSettings(prefix string, next, running any, skip ...string) []string {
+	nextValue, runningValue := reflect.ValueOf(next), reflect.ValueOf(running)
 	var changed []string
-	if !slices.Equal(next.Agents, running.Agents) {
-		changed = append(changed, "graft.agent")
-	}
-	nextRest, runningRest := next, running
-	nextRest.Policy, runningRest.Policy = nil, nil
-	nextRest.Agents, runningRest.Agents = nil, nil
-	if !reflect.DeepEqual(nextRest, runningRest) {
-		changed = append(changed, "graft (other than graft.policy and graft.agent)")
+	for i := 0; i < nextValue.NumField(); i++ {
+		field := nextValue.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		key, _, _ := strings.Cut(field.Tag.Get("toml"), ",")
+		if key == "" {
+			key = field.Name
+		}
+		if slices.Contains(skip, key) {
+			continue
+		}
+		if !reflect.DeepEqual(nextValue.Field(i).Interface(), runningValue.Field(i).Interface()) {
+			changed = append(changed, prefix+key)
+		}
 	}
 	return changed
 }

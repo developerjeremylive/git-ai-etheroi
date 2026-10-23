@@ -44,6 +44,9 @@ func TestPolicyReloadOnSignal(t *testing.T) {
 	require.NoError(t, n.cmd.Process.Signal(syscall.SIGUSR1))
 	waitFor(`graft_policy_reloads_total{result="applied"}`, 1)
 	require.EqualValues(t, 2, n.counter(t, "graft_policy_generation"))
+	// Only the policy changed: the server compares the file with the configuration it started
+	// with, as the file gave it, and finds nothing else.
+	require.NotContains(t, n.log(t), "they need a restart")
 
 	rewrite([]config.GraftPolicyRule{{Actor: "*", Refs: []string{"refs/heads/["}, Allow: true}})
 	require.NoError(t, n.cmd.Process.Signal(syscall.SIGUSR1))

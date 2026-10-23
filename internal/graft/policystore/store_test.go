@@ -95,7 +95,7 @@ func TestStore_reload(t *testing.T) {
 		outcome, err := s.Reload(next, running)
 		require.NoError(t, err)
 		require.Equal(t, Applied, outcome.Result)
-		require.Equal(t, []string{"graft.agent", "graft (other than graft.policy and graft.agent)"}, outcome.NeedsRestart)
+		require.Equal(t, []string{"graft.agent", "graft.agent_rpcs"}, outcome.NeedsRestart)
 		require.EqualValues(t, 3, s.Current().Generation)
 	})
 

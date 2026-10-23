@@ -19,13 +19,20 @@ var policyReloadSignal = syscall.SIGUSR1
 // for the reload.
 var reloaded = func(policystore.Outcome) {}
 
-// reloadPolicyOnSignal reloads the policy of store from the configuration file at configPath every
-// time the process receives policyReloadSignal, one reload at a time. running is the [graft]
-// section the server started with. The returned function stops it.
-func reloadPolicyOnSignal(logger log.Logger, configPath string, running config.Graft, store *policystore.Store) func() {
+// notifyPolicyReload returns a channel that receives policyReloadSignal from now on. One signal waits
+// in it until reloadPolicyOnSignal reads it, and those that come meanwhile make no more reloads.
+func notifyPolicyReload() chan os.Signal {
 	signals := make(chan os.Signal, 1)
-	done := make(chan struct{})
 	signal.Notify(signals, policyReloadSignal)
+	return signals
+}
+
+// reloadPolicyOnSignal reloads the policy of store from the configuration file at configPath every
+// time signals, which notifyPolicyReload returned, receives the signal, one reload at a time; a
+// signal that came before is handled at once. running is the configuration the server started
+// with, as the file gave it. The returned function stops it.
+func reloadPolicyOnSignal(logger log.Logger, configPath string, running config.Cfg, store *policystore.Store, signals chan os.Signal) func() {
+	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
@@ -42,10 +49,11 @@ func reloadPolicyOnSignal(logger log.Logger, configPath string, running config.G
 }
 
 // reloadPolicy reads the configuration file at configPath again and puts its policy in force when it
-// is valid; otherwise the policy in force stays. The outcome is logged: an invalid configuration at
-// ERROR, a new policy at INFO, and the changes that need a restart and the actors that name no
-// configured agent at WARN.
-func reloadPolicy(logger log.Logger, configPath string, running config.Graft, store *policystore.Store) policystore.Outcome {
+// is valid; otherwise the policy in force stays. running is the configuration the server started
+// with: the settings of the file that differ from it, other than the policy, need a restart. The
+// outcome is logged: an invalid configuration at ERROR, a new policy at INFO, and the settings that
+// need a restart and the actors that name no configured agent at WARN.
+func reloadPolicy(logger log.Logger, configPath string, running config.Cfg, store *policystore.Store) policystore.Outcome {
 	logger = logger.WithField("config_path", configPath)
 
 	next, err := loadConfig(configPath)
@@ -53,7 +61,10 @@ func reloadPolicy(logger log.Logger, configPath string, running config.Graft, st
 	if err != nil {
 		outcome = store.Reject()
 	} else {
-		outcome, err = store.Reload(next.Graft, running)
+		outcome, err = store.Reload(next.Graft, running.Graft)
+		if err == nil {
+			outcome.NeedsRestart = append(policystore.NeedsRestartOutsideGraft(next, running), outcome.NeedsRestart...)
+		}
 	}
 	if err != nil {
 		logger.WithError(err).WithFields(log.Fields{
@@ -77,7 +88,7 @@ func reloadPolicy(logger log.Logger, configPath string, running config.Graft, st
 		logger.WithFields(fields).Info("policy reload: the policy is unchanged")
 	}
 	if len(outcome.NeedsRestart) > 0 {
-		logger.WithField("needs_restart", outcome.NeedsRestart).Warn("policy reload: the configuration changed outside the policy; those changes need a restart and were not applied")
+		logger.WithField("needs_restart", outcome.NeedsRestart).Warn("policy reload: these settings changed outside the policy; they need a restart and were not applied")
 	}
 	if len(outcome.UnknownActors) > 0 {
 		logger.WithField("actors", outcome.UnknownActors).Warn("policy reload: actors of the policy that name no configured agent (user IDs of callers with the shared token?)")

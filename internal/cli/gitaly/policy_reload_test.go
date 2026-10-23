@@ -37,7 +37,7 @@ func reloadSetup(t *testing.T) (config.Cfg, *policystore.Store, testhelper.Logge
 	logger := testhelper.NewLogger(t)
 	hook := testhelper.AddLoggerHook(logger)
 	reload := func(configPath string) policystore.Outcome {
-		return reloadPolicy(logger, configPath, cfg.Graft, store)
+		return reloadPolicy(logger, configPath, cfg, store)
 	}
 	return cfg, store, hook, reload
 }
@@ -115,6 +115,19 @@ func TestReloadPolicy(t *testing.T) {
 		})
 	}
 
+	t.Run("a changed setting outside [graft] is named as needing a restart", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, store, _, reload := reloadSetup(t)
+		cfg.Graft.Policy = tighterRules
+		cfg.Logging.Level = "debug"
+
+		outcome := reload(testcfg.WriteTemporaryGitalyConfigFile(t, cfg))
+		require.Equal(t, policystore.Applied, outcome.Result)
+		require.Equal(t, []string{"logging"}, outcome.NeedsRestart)
+		require.Equal(t, tighterRules, store.Current().Rules)
+	})
+
 	t.Run("changed agents need a restart and are not applied; the policy is", func(t *testing.T) {
 		t.Parallel()
 
@@ -129,7 +142,7 @@ func TestReloadPolicy(t *testing.T) {
 		var warned bool
 		for _, entry := range hook.AllEntries() {
 			if entry.Level == logrus.WarnLevel {
-				require.Contains(t, entry.Message, "need a restart and were not applied")
+				require.Contains(t, entry.Message, "they need a restart and were not applied")
 				require.Equal(t, []string{"graft.agent"}, entry.Data["needs_restart"])
 				warned = true
 			}
@@ -143,7 +156,7 @@ func TestReloadPolicy(t *testing.T) {
 func TestReloadPolicyOnSignal(t *testing.T) {
 	cfg := startupConfig(t)
 	store := policystore.New(cfg.Graft.Policy)
-	running := cfg.Graft
+	running := cfg
 	cfg.Graft.Policy = tighterRules
 	configPath := testcfg.WriteTemporaryGitalyConfigFile(t, cfg)
 
@@ -152,10 +165,14 @@ func TestReloadPolicyOnSignal(t *testing.T) {
 	reloaded = func(outcome policystore.Outcome) { outcomes <- outcome }
 	t.Cleanup(func() { reloaded = original })
 
-	stop := reloadPolicyOnSignal(testhelper.NewLogger(t), configPath, running, store)
+	// The signal comes before the reloads start, as one may while the server starts: the channel
+	// that notifyPolicyReload registered keeps it, and the process does not take the signal's
+	// default action, its end.
+	signals := notifyPolicyReload()
+	require.NoError(t, syscall.Kill(os.Getpid(), policyReloadSignal))
+	stop := reloadPolicyOnSignal(testhelper.NewLogger(t), configPath, running, store, signals)
 	defer stop()
 
-	require.NoError(t, syscall.Kill(os.Getpid(), policyReloadSignal))
 	select {
 	case outcome := <-outcomes:
 		require.Equal(t, policystore.Applied, outcome.Result)
