@@ -41,7 +41,11 @@ FILE before a server reloads it (SIGUSR1). It changes nothing.
 What it cannot show: an update that the policy in force refused is not in the
 changeset log. The check lists what the candidate would newly deny among what
 happened, not what it would newly allow. A batched land whose list of members
-the log cut short is checked for the members it lists.`
+the log cut short is checked for the members it lists.
+
+Exit status: 0 when the policy is valid and denies none of the updates
+checked, 1 when it would deny some (they are printed) or a repository cannot
+be read, 2 when the policy is invalid.`
 
 // defaultPolicyCheckLimit is the number of changesets of each repository that
 // graft policy check reads by default.
@@ -172,9 +176,22 @@ func policyCheck(ctx context.Context, out io.Writer, o *options, f *policyFlags,
 	if o.jsonOut {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		return enc.Encode(res)
+		if err := enc.Encode(res); err != nil {
+			return err
+		}
+	} else {
+		printPolicyCheck(out, res)
 	}
-	printPolicyCheck(out, res)
+
+	// A candidate that would deny updates fails the check, so that a script can stop before the
+	// reload: the updates are printed above.
+	denied := 0
+	for _, repo := range res.Repositories {
+		denied += len(repo.Denied)
+	}
+	if denied > 0 {
+		return fmt.Errorf("the candidate policy would deny %d of the updates checked", denied)
+	}
 	return nil
 }
 

@@ -140,7 +140,7 @@ DEBUG.
 Before a reload, `graft policy check FILE` validates the file's policy as the
 reload will (exit 2 when the policy is invalid) and prints its hash; with
 `-repo REPO` it lists the recent updates of the repository that the new policy
-would deny. It checks the policy only: the reload also validates the rest of
+would deny, and exits 1 when there are any. It checks the policy only: the reload also validates the rest of
 the file, against the server's own paths and settings, and rejects a file that
 fails there.
 
