@@ -6,7 +6,8 @@
 # Usage: examples/graft/quickstart.sh [WORKDIR]
 # Requires: the Gitaly build dependencies (Go, make, and what the bundled Git
 # needs to compile, see "Installation" in the Gitaly part of README.md),
-# openssl, and curl (optional, for the cache statistics).
+# git (make build uses it), openssl, and curl (optional, for the cache
+# statistics).
 # WORKDIR defaults to a fresh temporary directory.
 #
 # The steps mirror doc/graft/QUICKSTART.md. The script assumes a Git checkout

@@ -78,8 +78,9 @@ graft repo create demo.git --initial-commit --branch feature/demo
 The initial commit passes the policy like any write, as the user of
 `GRAFT_USER`: here `planner`, who may write `main`. `--branch feature/demo`
 also creates `feature/demo` at the initial commit, which the builder lands on
-below. If the initial commit fails, run the same command again: on a
-repository without branches it only adds the commit.
+below. The command converges on the state it asks for: if it fails part way,
+run it again, and it does only what is left (`graft repo create -h` has the
+rules).
 
 ## 5. Start the cache daemon
 

@@ -138,9 +138,7 @@ Git hooks use private.
   the shared token: agents may not create repositories. In shadow mode the new
   repository is not tracked until `graft storage import`.
 - `graft clone` needs the branch to exist. An empty repository cannot be cloned:
-  `graft repo create --initial-commit` gives it a first commit. The CLI and the
-  workspace cannot make the first commit of a repository created without it;
-  the SDK can (`CommitFiles` onto the default branch, without `StartRev`).
+  `graft repo create --initial-commit` gives it a first commit.
 - Durability of written objects assumes a local journaling filesystem, ext4 (in
   any `data=` mode) or xfs, not NFS. The objects of a write are made durable by
   their writer, and the migration of the write's quarantine into the repository

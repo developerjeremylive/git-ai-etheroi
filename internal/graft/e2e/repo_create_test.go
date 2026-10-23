@@ -47,7 +47,7 @@ func TestRepoCreateWithTheCLI(t *testing.T) {
 		Created       bool     `json:"created"`
 		DefaultBranch string   `json:"default_branch"`
 		InitialCommit string   `json:"initial_commit"`
-		Branches      []string `json:"branches"`
+		Branches      []string `json:"branches_created"`
 	}
 	out := runGraft(t, bin, operator, "repo", "create", rel, "--initial-commit", "--branch", "feature/demo", "--json")
 	require.NoError(t, json.Unmarshal([]byte(out), &created))

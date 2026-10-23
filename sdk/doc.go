@@ -15,9 +15,10 @@
 //     calls the server answers with Unavailable (see UnavailableRetry).
 //   - Blame and PathHistory answer history questions from derived data.
 //   - Changesets and WatchChangesets read the repository's changeset log.
-//   - Create creates an empty repository, and HasBranches tells whether it
-//     is still empty (RepositoryService; operators only, with the shared
-//     token).
+//   - Create creates an empty repository (operators only, with the shared
+//     token). Head, HasReferences, ReferenceExists and ZeroOID are the exact
+//     reads that make a repository's first commit safe to retry, and
+//     CreateBranch creates a branch that must not exist yet.
 //
 // Errors are standard gRPC errors. Structured details of landing and commit
 // failures are available through LandError, CommitFilesError and the Is*

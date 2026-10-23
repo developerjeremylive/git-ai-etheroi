@@ -2,6 +2,9 @@ package sdk
 
 import (
 	"context"
+	"errors"
+	"io"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -45,17 +48,107 @@ func (r *Repo) Create(ctx context.Context, opts CreateOptions) error {
 	return err
 }
 
-// HasBranches reports whether the repository has at least one branch. It
-// fails with NotFound if the repository does not exist. Like Create, it needs
-// the shared token.
-func (r *Repo) HasBranches(ctx context.Context) (bool, error) {
-	resp, err := r.repositories().HasLocalBranches(ctx, &gitalypb.HasLocalBranchesRequest{
+// Head returns the full name of the reference that HEAD of the repository
+// points to, for example refs/heads/main. The reference may not exist yet, as
+// in a repository without commits.
+func (r *Repo) Head(ctx context.Context) (string, error) {
+	resp, err := gitalypb.NewRefServiceClient(r.client.conn).FindDefaultBranchName(ctx, &gitalypb.FindDefaultBranchNameRequest{
 		Repository: r.repository(),
+		HeadOnly:   true,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(resp.GetName()), nil
+}
+
+// HasReferences reports whether the repository has any reference at all
+// (branches, tags and every other namespace below refs/). It stops reading at
+// the first reference. Like Create, it needs the shared token.
+func (r *Repo) HasReferences(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := gitalypb.NewRefServiceClient(r.client.conn).ListRefs(ctx, &gitalypb.ListRefsRequest{
+		Repository: r.repository(),
+		Patterns:   [][]byte{[]byte("refs/")},
+	})
+	if err != nil {
+		return false, err
+	}
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if len(resp.GetReferences()) > 0 {
+			return true, nil
+		}
+	}
+}
+
+// ReferenceExists reports whether the reference with the full name name (for
+// example refs/heads/main) exists, by its exact name. Like Create, it needs the
+// shared token.
+func (r *Repo) ReferenceExists(ctx context.Context, name string) (bool, error) {
+	if !strings.HasPrefix(name, "refs/") {
+		return false, status.Errorf(codes.InvalidArgument, "reference %q: want a full name below refs/", name)
+	}
+	resp, err := gitalypb.NewRefServiceClient(r.client.conn).RefExists(ctx, &gitalypb.RefExistsRequest{
+		Repository: r.repository(),
+		Ref:        []byte(name),
 	})
 	if err != nil {
 		return false, err
 	}
 	return resp.GetValue(), nil
+}
+
+// ZeroOID returns the zero object ID of the repository's object hash: as
+// CommitOptions.ExpectedOldOID it requires that the branch does not exist yet.
+// Like Create, it needs the shared token.
+func (r *Repo) ZeroOID(ctx context.Context) (string, error) {
+	resp, err := r.repositories().ObjectFormat(ctx, &gitalypb.ObjectFormatRequest{Repository: r.repository()})
+	if err != nil {
+		return "", err
+	}
+	switch resp.GetFormat() {
+	case gitalypb.ObjectFormat_OBJECT_FORMAT_SHA1:
+		return strings.Repeat("0", 40), nil
+	case gitalypb.ObjectFormat_OBJECT_FORMAT_SHA256:
+		return strings.Repeat("0", 64), nil
+	default:
+		return "", status.Errorf(codes.Internal, "unknown object format %v", resp.GetFormat())
+	}
+}
+
+// CreateBranchOptions describes a branch created by CreateBranch.
+type CreateBranchOptions struct {
+	// Branch is the new branch, without the refs/heads/ prefix.
+	Branch string
+	// StartPoint is the commit the branch points to.
+	StartPoint string
+	// User is the acting user, which the server's access policy checks.
+	User User
+}
+
+// CreateBranch creates a branch that must not exist yet. It fails with
+// FailedPrecondition when the branch exists, and with PermissionDenied when
+// the server's policy refuses the update.
+func (r *Repo) CreateBranch(ctx context.Context, opts CreateBranchOptions) error {
+	if trimBranchPrefix(opts.Branch) == "" || opts.StartPoint == "" {
+		return status.Error(codes.InvalidArgument, "branch and start point are required")
+	}
+	_, err := r.client.operations.UserCreateBranch(ctx, &gitalypb.UserCreateBranchRequest{
+		Repository: r.repository(),
+		BranchName: []byte(trimBranchPrefix(opts.Branch)),
+		User:       opts.User.toProto(),
+		StartPoint: []byte(opts.StartPoint),
+	})
+	return err
 }
 
 // objectFormat maps the object format of CreateOptions to its protobuf value.
