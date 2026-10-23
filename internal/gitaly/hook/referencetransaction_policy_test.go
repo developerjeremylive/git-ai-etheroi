@@ -250,6 +250,28 @@ func TestEnforceGraftPolicy_refsGraftIsReserved(t *testing.T) {
 		"outside standalone mode the policy does not apply")
 }
 
+// TestEnforceGraftPolicy_batchIsHeldToTheReservation: the combined update of a land batch runs
+// without an identity and skips the policy (its members were admitted one by one), but not the
+// reservation of refs/graft/, in every mode.
+func TestEnforceGraftPolicy_batchIsHeldToTheReservation(t *testing.T) {
+	t.Parallel()
+
+	ctx := testhelper.Context(t)
+	payload := `{"graft_changelog":{"operation":"land_batch","members":[{"original_commit":"a","commit":"b","actor":"agent-a"}]}}`
+	env := []string{gitcmd.EnvHooksPayload + "=" + base64.StdEncoding.EncodeToString([]byte(payload))}
+
+	for name, graft := range map[string]config.Graft{
+		"standalone, policy denies": {Standalone: true, Policy: []config.GraftPolicyRule{{Allow: false}}},
+		"not standalone":            {Agents: []config.GraftAgent{{Name: "agent-a"}}},
+	} {
+		m := graftPolicyManager(t, graft)
+		err := m.enforceGraftPolicy(ctx, env, policyChanges("refs/graft/green/main"))
+		require.Equal(t, codes.PermissionDenied, status.Code(err), name)
+		require.ErrorContains(t, err, "reserved for the server", name)
+		require.NoError(t, m.enforceGraftPolicy(ctx, env, policyChanges("refs/heads/main")), "%s: the batch skips the policy", name)
+	}
+}
+
 // TestCheckAgentPolicy checks the policy check of the RPCs that skip the pre-receive hook: the
 // reservation of refs/graft/ refuses an agent in every mode, the rest of the policy only in
 // standalone mode, and callers that are not agents are not restricted.

@@ -505,19 +505,22 @@ func (m *GitLabHookManager) graftPolicyDecision(env []string, changes []byte) (s
 	// call updates no references. The skip therefore gives it no new reach.
 	// Only the batch operation carries members, so any other update is still
 	// checked here.
-	if meta.Operation == changelog.OperationLandBatch && len(meta.Members) > 0 {
-		return "", nil
-	}
-
-	if !meta.Agent || meta.Actor == "" {
-		return "", nil
-	}
+	batch := meta.Operation == changelog.OperationLandBatch && len(meta.Members) > 0
+	agent := meta.Agent && meta.Actor != ""
 
 	// refs/graft/ is the server's, whatever the policy says and whether or not the server runs
 	// in standalone mode: it is not a rule of the policy but an invariant of the server, for
-	// every agent.
-	if message := graftReservedDenial(changes); message != "" {
-		return message, nil
+	// every agent. A batch runs without an identity but lands the changes of its members, so it
+	// is held to the reservation too, before the batch skip below: a batch only ever updates
+	// its branch, and this keeps it so whatever builds it.
+	if batch || agent {
+		if message := graftReservedDenial(changes); message != "" {
+			return message, nil
+		}
+	}
+
+	if batch || !agent {
+		return "", nil
 	}
 	if !policyApplies {
 		return "", nil

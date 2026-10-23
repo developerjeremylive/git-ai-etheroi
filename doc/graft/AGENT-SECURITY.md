@@ -174,12 +174,18 @@ layers that enforce it, in the order a request meets them:
 push, and `TestPolicyHookDecidesForAgentUpdates` layer 4 alone (the real hook,
 run by `git update-ref` with the payload of an agent's write, a symbolic
 reference included), both in standalone mode and outside it. The pre-receive
-hook judges the policy only; it does not check the reservation, because no
-agent write reaches it with a `refs/graft/` update.
+hook does not check the reservation: it judges the policy in standalone mode
+(GitLab's `/allowed` outside it), and it sees the names that were pushed, not
+what git will write. A push to `refs/heads/alias`, a symbolic reference to
+`refs/graft/x`, reaches it as `refs/heads/alias` and would write
+`refs/graft/x`; the reference-transaction hook, which sees `refs/graft/x`,
+refuses it. The combined update of a land batch, which runs without an agent
+identity, is held to the reservation by the hook as well.
 
 Every other RPC that is not on the allowlist (for example the other
-`OperationService` RPCs such as `UserMergeBranch`, or `SSHService`) is denied
-by default and can be enabled with `graft.agent_rpcs`.
+`OperationService` RPCs such as `UserMergeBranch`, or the other `SSHService`
+RPCs) is denied by default and can be enabled with `graft.agent_rpcs`, except
+the RPCs that can never be enabled (above), `SSHUploadArchive` among them.
 
 A call outside the allowlist fails with `PermissionDenied`. The error does
 not reveal more than that the method is not allowed for agents.
