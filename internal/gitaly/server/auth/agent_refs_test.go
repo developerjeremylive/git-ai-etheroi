@@ -99,6 +99,8 @@ func TestCheckAgentRefs(t *testing.T) {
 		"ListBlobs, a name after a line":      {&gitalypb.ListBlobsRequest{Revisions: []string{"--glob=x\nrefs/graft/green/main"}}, true},
 		"ListCommits, a name after a CR":      {&gitalypb.ListCommitsRequest{Revisions: []string{"--glob=x\rrefs/graft/green/main"}}, true},
 		"ListCommits, a name after a NUL":     {&gitalypb.ListCommitsRequest{Revisions: []string{"--glob=x\x00refs/graft/green/main"}}, true},
+		"GetArchive of a proposal":            {&gitalypb.GetArchiveRequest{CommitId: "refs/graft/proposals/0123456789abcdef/1"}, true},
+		"GetArchive of a branch":              {&gitalypb.GetArchiveRequest{CommitId: "main"}, false},
 	} {
 		err := checkAgentRefs(agentContext(), tc.req)
 		if tc.denied {

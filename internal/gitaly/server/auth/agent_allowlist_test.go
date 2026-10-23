@@ -150,6 +150,7 @@ func TestAgentAllowlist_EveryRegisteredRPC(t *testing.T) {
 	require.Positive(t, allowed)
 
 	for _, fullMethod := range []string{
+		gitalypb.SSHService_SSHUploadArchive_FullMethodName,
 		gitalypb.RepositoryService_WriteRef_FullMethodName,
 		gitalypb.RefService_DeleteRefs_FullMethodName,
 		gitalypb.RefService_UpdateReferences_FullMethodName,
@@ -349,6 +350,7 @@ func TestNewAgentAllowlist_Validation(t *testing.T) {
 		{desc: "backup repository", rpcs: []string{gitalypb.RepositoryService_BackupRepository_FullMethodName}, wantErr: "may never be called by an agent"},
 		{desc: "ssh upload-pack is opt-in only", rpcs: []string{gitalypb.SSHService_SSHUploadPackWithSidechannel_FullMethodName}},
 		{desc: "ssh receive-pack is opt-in only", rpcs: []string{gitalypb.SSHService_SSHReceivePack_FullMethodName}},
+		{desc: "ssh upload-archive", rpcs: []string{gitalypb.SSHService_SSHUploadArchive_FullMethodName}, wantErr: "may never be called by an agent"},
 		{desc: "hook callback", rpcs: []string{gitalypb.HookService_PreReceiveHook_FullMethodName}, wantErr: "may never be called by an agent"},
 		{desc: "object pool", rpcs: []string{gitalypb.ObjectPoolService_DeleteObjectPool_FullMethodName}, wantErr: "may never be called by an agent"},
 		{desc: "cleanup service", rpcs: []string{gitalypb.CleanupService_RewriteHistory_FullMethodName}, wantErr: "may never be called by an agent"},

@@ -61,8 +61,12 @@ in `internal/graft/e2e` covers the denials end to end, and the tests of
 reference-transaction hook.
 
 Agents never create, update or delete a reference under `refs/graft/`, whatever
-the policy says: that namespace is the server's (land proposals, graft-verify's
-references), and the reference-transaction hook refuses it.
+the policy says and in every mode, standalone or not: that namespace is the
+server's (land proposals, graft-verify's references). The request filter
+refuses a request that names it, `git-receive-pack` hides it from agents on a
+push, `UserMergeToRef` and `UserRebaseToRef` refuse it before they write, and
+the reference-transaction hook refuses it as the last layer, also through a
+symbolic reference. See [AGENT-SECURITY](AGENT-SECURITY.md).
 
 The policy governs the references under `refs/` and the `HEAD` symbolic
 reference, so an agent cannot repoint `HEAD` to get around a protected branch.
@@ -92,6 +96,7 @@ they are rejected with `PermissionDenied` and need the shared token:
 - `RefService`: `UpdateReferences`, `DeleteRefs`;
 - `RemoteService`: `UpdateRemoteMirror`, `FindRemoteRepository`,
   `FindRemoteRootRef` (they push to or query a URL the caller chooses);
+- `SSHService`: `SSHUploadArchive` (it reads any revision its input names);
 - every RPC of `HookService`, `ObjectPoolService`, `CleanupService`,
   `PartitionService`, `InternalGitaly` and `StorageCoreService`.
 

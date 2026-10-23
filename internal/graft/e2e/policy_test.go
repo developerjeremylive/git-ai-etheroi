@@ -20,6 +20,12 @@ import (
 // policy checks. A denied land names the policy rule, without a GitLab prefix,
 // and the planner may move main with UserLand. No changeset on main may name
 // the builder. Covers WP1, WP2 and WP15.
+//
+// The layers it reaches: WriteRef, DeleteRefs and RemoveRepository stop at the
+// agent allowlist, and the land stops at the pre-receive hook. It does not reach
+// the reference-transaction hook: TestPolicyHoldsOnAgentPushes covers the push
+// path (receive.hideRefs, then the pre-receive hook), and
+// TestPolicyHookDecidesForAgentUpdates the reference-transaction hook alone.
 func TestPolicyHoldsForEveryReferenceUpdate(t *testing.T) {
 	t.Parallel()
 
