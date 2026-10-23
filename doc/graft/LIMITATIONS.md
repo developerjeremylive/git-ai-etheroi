@@ -177,6 +177,16 @@ Git hooks use private.
   file of the write. Pushes over SSH or HTTP are different: git's receive-pack
   migrates its own quarantine, so objects that a custom hook writes there
   without git are only as durable as the hook makes them.
+- A push of fewer than 100 objects (most pushes) can fail, rarely, if
+  housekeeping's `git prune-packed` runs on the same repository at the same
+  instant: git receive-pack unpacks such a push into loose objects in its
+  quarantine, and the migration of the quarantine creates a loose-object
+  directory (`objects/xx`) and links into it; prune-packed removes empty such
+  directories, so a removal between the two fails the link. Retry the push;
+  nothing is corrupted and no reference changes. The objects migrated before
+  the failure stay in the repository unreferenced, as in the next item. A
+  larger push keeps a pack, which is not affected. The server's own write RPCs
+  are not affected either: their migration creates a removed directory again.
 - The objects of an update that fails after the quarantine migration remain in
   the repository unreferenced until housekeeping prunes them. They have passed
   the pre-receive hook. Until pruned, they can be read by object ID by anyone
