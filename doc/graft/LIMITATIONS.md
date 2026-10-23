@@ -35,24 +35,34 @@ as sent. The `builder` token with `User.ID` set to `planner` is denied on
 For a request authenticated with the shared `auth.token`, or with no
 authentication, the policy decides on the acting user ID that the request
 carries. The request defaults fill it with `shared` (or `anonymous`) only when
-the client left it empty. The shared token is an administrative credential: a
-holder of it can act as any user, as with upstream Gitaly and GitLab.
+the client left it empty; the `shared` identity exists only when agents are
+configured, so without agents a caller with the shared token is `anonymous`.
+The shared token is an administrative credential: a holder of it can act as any
+user, as with upstream Gitaly and GitLab.
 
 The changeset log records the identity of the token as the actor: the agent
-name, or `shared` for the shared token. Without agents, it falls back to the
-client's user ID. `TestChangesetActorUsesTokenIdentity` in `internal/graft/e2e`
-pins this.
+name, or `shared` for the shared token when agents are configured. Without
+agents, it falls back to the client's user ID.
+`TestChangesetActorUsesTokenIdentity` in `internal/graft/e2e` pins this.
 
 ### Which updates the policy covers
 
-For a request made with an agent token, the policy is enforced on every
-reference update that Gitaly performs, not only on pushes and OperationService
-RPCs. The pre-receive hook checks pushes and OperationService RPCs such as
-`UserLand`. The reference-transaction hook checks the policy again while the
-references are locked, before they change, so RPCs that do not run pre-receive
-are covered too. A denied update is aborted as a whole and is not recorded in
-the changeset log. The server log names the rule that denied the update.
-`TestPolicyHoldsForEveryReferenceUpdate` in `internal/graft/e2e` pins this.
+In standalone mode, for a request made with an agent token, the policy is
+enforced on every reference update that Gitaly performs, not only on pushes and
+OperationService RPCs. The pre-receive hook checks pushes and OperationService
+RPCs such as `UserLand`. The reference-transaction hook checks the policy again
+while the references are locked, before they change, so RPCs that do not run
+pre-receive are covered too; the members of a land batch were checked one by one
+before the batch, and the hook does not check them again. A denied update is
+aborted as a whole and is not recorded in the changeset log. The server log
+names the rule that denied the update. `TestPolicyHoldsForEveryReferenceUpdate`
+in `internal/graft/e2e` covers the denials end to end, and the tests of
+`internal/gitaly/hook/referencetransaction_policy_test.go` the check in the
+reference-transaction hook.
+
+Agents never create, update or delete a reference under `refs/graft/`, whatever
+the policy says: that namespace is the server's (land proposals, graft-verify's
+references), and the reference-transaction hook refuses it.
 
 The policy governs the references under `refs/` and the `HEAD` symbolic
 reference, so an agent cannot repoint `HEAD` to get around a protected branch.
@@ -64,8 +74,9 @@ Agents may call only the RPCs of the agent allowlist (see
 pre-receive and are reachable by agents, `UserMergeToRef` and `UserRebaseToRef`
 when an operator enables them with `agent_rpcs`, check the policy first and
 return `PermissionDenied` with the policy message. Another such RPC enabled
-with `agent_rpcs` reports a denial only as a failed `git update-ref` (code
-`Internal`); the update is still refused.
+with `agent_rpcs` reports a denial only as a failed reference update, with the
+code that RPC gives such a failure (`Internal` or `FailedPrecondition`); the
+update is still refused.
 
 Some RPCs replace, remove or rewrite a whole repository, create one from data
 or a URL the caller chooses, write references outside the policy or install
@@ -104,9 +115,10 @@ Git hooks use private.
 
 - The access policy is read at startup. Changing it needs a restart. There is
   no management API for policies.
-- Policy globs use `path.Match` semantics with a trailing `**` (any remainder,
-  including `/`). Invalid globs and empty `refs` entries are rejected when the
-  configuration is loaded. Globs are not a
+- Policy globs use `path.Match` semantics with a trailing `**`: `prefix/**`
+  matches every reference below `prefix/` at any depth (not `prefix` itself),
+  and a bare `**` matches every reference. Invalid globs and empty `refs`
+  entries are rejected when the configuration is loaded. Globs are not a
   permission language: a rule cannot say "allow only if the change touches files
   under `docs/`".
 - A reference that no rule matches is denied while the policy is not empty. A
@@ -118,19 +130,25 @@ Git hooks use private.
   agent sends are passed to GitLab's `/allowed` check unchanged, so an agent
   can act as any GitLab user. The `HookService`, administrative RPC and
   `git_config_options` denials apply in both modes.
-- With agents configured, every request must carry credentials, including
-  Gitaly-to-Gitaly calls to the external address (for example
-  `ReplicateRepository` or `CreateFork` across nodes). Those calls use the shared
-  token, so set `auth.token` whenever agents are configured and servers talk to
-  each other. Without it they fail with `Unauthenticated`.
-- The identity of a token is the agent name, or `shared` for the shared token.
+- With agents configured, every request to the external address must carry
+  credentials (health checks excepted), including Gitaly-to-Gitaly calls (for
+  example `ReplicateRepository` or `CreateFork` across nodes). Those calls use
+  the token that the caller passes for the other node in the `gitaly-servers`
+  metadata, and the other node accepts it only if it is its shared token, so set
+  `auth.token` whenever agents are configured and servers talk to each other.
+  Without it they fail with `Unauthenticated`.
+- The identity of a token is the agent name, or `shared` for the shared token
+  (when agents are configured).
   The policy checks the agent of the token, or the client-sent acting user ID
   for the shared token (see Security limitations above). There are no users, groups or
   per-repository roles.
 - Denial messages from the standalone policy name the actor, the reference
   and the rule, for example
-  `policy denies "builder" to update "refs/heads/main" (rule 2)`, and are
-  returned as `PermissionDenied`. They do not start with `GitLab:`.
+  `policy denies "builder" to update "refs/heads/main" (rule 2)` (or `no
+  matching rule`). They do not start with `GitLab:`. OperationService RPCs
+  return them as `PermissionDenied`, some behind their own prefix (for example
+  `creation denied by access checks: ...`); a push shows them on git's
+  standard error.
 
 ### Repositories
 
@@ -159,8 +177,9 @@ Git hooks use private.
   the pre-receive hook. Until pruned, they can be read by object ID by anyone
   with read access to the repository. This happens when a land loses its
   compare-and-swap (a batch attempt leaves one pack, an unbatched land loose
-  objects), when the expected old revision of a write is stale, and after a
-  crash between the migration and the reference update.
+  objects), when the expected old revision of a write is stale, when the update
+  hook or the policy check of the reference-transaction hook refuses the update,
+  and after a crash between the migration and the reference update.
 
 ### Landing (`UserLand`)
 
@@ -190,14 +209,16 @@ Git hooks use private.
   1000 commits closest to the tip (the land identity of [PLAN11](PLAN11.md)). Landing it again needs a new commit: a revert of
   the revert, or the change committed again. A branch reset past the land
   lands the change again.
-- The land identity is recorded in the changeset log. With
-  `[graft.changelog] disabled = true` nothing is recorded, and a retried
-  rebase land replays the change: a change reverted in between lands again.
+- The land identity is recorded in the changeset log. With the file changelog
+  (storage core off or in shadow mode) and `[graft.changelog] disabled = true`,
+  nothing is recorded, and a retried rebase land replays the change: a change
+  reverted in between lands again. In authoritative mode the land identity is
+  looked up in the storage core's database whatever that setting is.
 - In the file changelog, every land update writes and fsyncs its intents
   (`graft/changelog.intents`) in the prepared phase, under the references'
-  locks, and a land whose intents cannot be written fails. The intent of an
-  update that git never committed stays in the file, one line of about 200
-  bytes per such update.
+  locks, and a land whose intents cannot be written fails. The intents of an
+  update that git never committed stay in the file: one line of about 200
+  bytes per land of that update (a batch update has one per member).
 - A land that diverges reads the land identities before it rebases or
   merges, and fails when it cannot: an error reading the changeset log or the
   identity index, or a timeout on their lock files, fails the land rather than
@@ -221,10 +242,10 @@ Git hooks use private.
   sends 500 IDs per request at first. When the server refuses a request as too
   large, the SDK lowers its batch size to the server's limit and keeps it for
   later calls. `sdk.WithObjectBatchSize` sets the size from the start.
-- Object data is streamed in chunks, but the server still reads each object
-  through the catfile cache, and a request loads all of its objects before it
-  sends the first message. Very large blobs and very large batches are not a good
-  fit yet.
+- Gitaly reads each object through the catfile cache and streams it in chunks
+  as it reads it. The cache tier, however, holds all the objects of a request
+  in memory before it sends the first message (within `--max-request-bytes`,
+  below), so very large blobs and very large batches are not a good fit there.
 - The cache tier serves `GetObjects`, and `GetTree` only when a `tree_oid` is
   given, because revisions move. Every other RPC is forwarded uncached.
 - A `GetObjects` request through the cache tier may hold at most
@@ -246,8 +267,12 @@ Git hooks use private.
 
 ### Changeset log and derived data
 
-- The changeset log is one JSON Lines file per repository. It is simple and
-  durable, but it has no index. Very long logs are read sequentially.
+- With the storage core off or in shadow mode, the changeset log is one JSON
+  Lines file per repository. Its offset index (one point every 256 sequences)
+  lives only in the memory of the process: the first read of a long log after a
+  restart, or after the process dropped the log's cached state, reads the file
+  from the start. In authoritative mode the log is a database table indexed by
+  sequence. Neither is ever trimmed.
 - Only reference updates that pass through Gitaly's transaction path are
   recorded. Updates made by other tools that write to the repository directly
   are not.
@@ -264,7 +289,10 @@ Git hooks use private.
   core only once they are fsynced, and an RPC returns only after its entries
   are, so a reader never sees an entry that a crash could take back. The entries
   of the transactions that commit together are written with one fsync, in the
-  order in which the transactions locked their references.
+  order in which the transactions locked their references. A transaction that
+  reports its outcome more than 5 s after it locked its references is recorded
+  when it does, out of that order, and counted
+  (`graft_changelog_unordered_records_total`).
 - When an append fails and cutting off the bytes it wrote fails too (two I/O
   errors in a row), only the process that wrote them remembers that they are not
   entries, and it forgets this when it drops its cache of the log. Another Gitaly
@@ -277,7 +305,8 @@ Git hooks use private.
   primary's log becomes authoritative, and clients must not reuse a cursor from
   the old primary's log.
 - Temporary branches of `graft commit` appear in the log (`commit_files`,
-  `delete_refs`). Filter by reference or operation to follow only lands.
+  `delete_branch`). Filter by reference or operation (`land`, `land_batch`) to
+  follow only lands.
 - With `[graft.derived] eager = false` (the default), derived data is computed on
   first read, so the first `Blame` on a long history walks that history. With
   `eager = true` only the `graph` and `changed-paths` kinds are computed in the
@@ -287,7 +316,8 @@ Git hooks use private.
 
 - The Go SDK (`sdk/`) is the only supported client library. Other languages can
   use the generated gRPC stubs, but no bindings are provided.
-- The server runs on Linux and macOS only. The `graft` CLI and the SDK also run
+- The server runs on Linux and macOS only, and CI tests it on Linux only. The
+  `graft` CLI and the SDK also run
   on Windows (`go build ./cmd/graft`); CI builds them there, starts the CLI and
   runs the workspace tests.
 - `graft` is a sparse, server-centric workspace for agents, not a replacement
@@ -298,12 +328,15 @@ Git hooks use private.
 - `graft` does not materialize repository paths that are reserved, such as
   `.git` or `.graft` directories at any depth, or that are not safe file names
   on the client's system, such as names with `:` or `\` on Windows. It lists
-  them as warnings after `clone`, `update`, `sparse` and a land. Such paths stay
-  unchanged on the server, and commits from the workspace do not touch them.
+  them as warnings after `clone`, `update`, `sparse`, `commit` and a land.
+  Such paths stay unchanged on the server, and commits from the workspace do
+  not touch them.
 
 ### Operations and scale
 
-- The end-to-end tests run on one machine. Multi-node behaviour is untested.
+- The end-to-end tests run on one machine. Several nodes that share one
+  database and one bucket are tested there (`internal/graft/e2e`, for example
+  `storage_multinode_test.go`); nodes on separate machines are not.
 - Praefect is not part of standalone mode. Praefect-based deployments keep
   upstream behaviour. `UserLand` is registered with Praefect as a
   transactional mutator, but Graft's tests cover only the routing of the
@@ -318,13 +351,14 @@ commitment.
    reports what a policy change would allow.
 2. Eager derived data for `lastmod` and blame when a change lands, with metrics
    for hit rates. Phase 3 computes `graph` and `changed-paths` eagerly.
-3. Changeset log retention and an index by sequence, so long logs can be
-   followed without a sequential read.
-4. Client-side help for the conflicts that the server's resolver does not
-   handle: the `merge_conflict` error already lists the conflicting files and
-   commits, but the CLI cannot yet materialize them in the workspace for an
-   agent to fix (phase 2 added server-side resolution, see
-   [RESOLVE](RESOLVE.md)).
+3. Changeset log retention, and an offset index of the file log that survives
+   a restart.
+4. Client-side help for every conflict: `graft land --resolve --conflicts-dir
+   DIR` writes the conflicts of a land (the merged files with conflict markers,
+   the three sides and the resolver's proposals) into DIR, and
+   `graft land --resolved DIR` lands the result. A land without `--resolve`
+   that fails with `merge_conflict` writes nothing yet, and the files are not
+   written into the workspace itself (see [RESOLVE](RESOLVE.md)).
 5. Multi-node cache tiers with explicit invalidation for mutable keys.
 6. Signed changesets and a verifiable export of the log.
 

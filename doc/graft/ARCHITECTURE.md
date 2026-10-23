@@ -106,12 +106,12 @@ client                      graft-cache (optional)        gitaly (standalone)
   |   UserLandResponse             |                              |
   |<-------------------------------|<-----------------------------|
   |                                |                              |
-  | DeleteRefs(temporary branch)   |  pass-through                |
-  |------------------------------->|----------------------------->| changeset: operation=delete_refs
+  | UserDeleteBranch(temporary)    |  pass-through                |
+  |------------------------------->|----------------------------->| changeset: operation=delete_branch
 ```
 
 The temporary branch is written with `commit_files` and removed with
-`delete_refs`, so the changeset log shows both steps next to the `land`.
+`delete_branch`, so the changeset log shows both steps next to the `land`.
 
 ### Read (sparse checkout and history)
 
